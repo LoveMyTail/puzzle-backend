@@ -9,6 +9,9 @@ dist/
 .ruff_cache/
 .mypy_cache/
 
+# Runtime data
+data/
+
 # Virtual environment
 .venv/
 
