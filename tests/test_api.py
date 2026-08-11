@@ -1,5 +1,7 @@
 """API tests for project creation and box-cover calibration."""
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -114,6 +116,7 @@ def test_update_board_finds_gaps(client: TestClient) -> None:
 
     detail = client.get(f"/api/projects/{project_id}").json()
     assert detail["board"]["filled_cells"] == body["filled_cells"]
+    assert Path(detail["board"]["mask_path"]).exists()
 
 
 def test_update_board_requires_calibration(client: TestClient) -> None:
@@ -124,3 +127,63 @@ def test_update_board_requires_calibration(client: TestClient) -> None:
         data={"corners": "[[0,0],[1,0],[1,1],[0,1]]"},
     )
     assert resp.status_code == 409
+
+
+def _piece_photo_bytes() -> bytes:
+    image = np.full((200, 200, 3), 255, dtype=np.uint8)
+    cv2.rectangle(image, (40, 40), (160, 160), (30, 30, 30), -1)
+    ok, buf = cv2.imencode(".jpg", image)
+    assert ok
+    return buf.tobytes()
+
+
+def _prepare_located_project(client: TestClient) -> str:
+    project_id = _create_project(client)["project_id"]
+    resp = client.put(
+        f"/api/projects/{project_id}/calibration",
+        json={"points": [[0, 0], [400, 0], [400, 300], [0, 300]]},
+    )
+    assert resp.status_code == 200
+    resp = client.put(
+        f"/api/projects/{project_id}/board",
+        files={"board_photo": ("board.jpg", _board_photo_bytes(), "image/jpeg")},
+        data={"corners": "[[30,25],[470,35],[475,395],[20,385]]"},
+    )
+    assert resp.status_code == 200
+    return project_id
+
+
+def test_locate_piece_returns_candidates(client: TestClient) -> None:
+    project_id = _prepare_located_project(client)
+    resp = client.post(
+        f"/api/projects/{project_id}/locate",
+        files={"piece_photo": ("piece.jpg", _piece_photo_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["candidates"]) == 3
+    for candidate in body["candidates"]:
+        assert {"row", "col", "score", "confidence", "rotation"} <= set(candidate)
+    assert body["latency_ms"] >= 0
+
+
+def test_locate_requires_board_state(client: TestClient) -> None:
+    project_id = _create_project(client)["project_id"]
+    resp = client.put(
+        f"/api/projects/{project_id}/calibration",
+        json={"points": [[0, 0], [400, 0], [400, 300], [0, 300]]},
+    )
+    assert resp.status_code == 200
+    resp = client.post(
+        f"/api/projects/{project_id}/locate",
+        files={"piece_photo": ("piece.jpg", _piece_photo_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 409
+
+
+def test_locate_unknown_project_returns_404(client: TestClient) -> None:
+    resp = client.post(
+        "/api/projects/does-not-exist/locate",
+        files={"piece_photo": ("piece.jpg", _piece_photo_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 404

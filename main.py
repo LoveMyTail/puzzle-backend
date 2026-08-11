@@ -4,13 +4,16 @@ Run locally with:  uvicorn main:app --reload
 """
 
 import json
+import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 from puzzle.db import projects as project_store
-from puzzle.vision import board, calibration
+from puzzle.solver import matcher
+from puzzle.vision import board, calibration, piece
 
 app = FastAPI(title="Puzzle Assistant Backend", version="0.1.0")
 
@@ -139,9 +142,11 @@ def update_board(
     photo_path = directory / "board_photo.jpg"
     warped_path = directory / "board_warped.jpg"
     preview_path = directory / "board_preview.jpg"
+    mask_path = directory / "board_mask.png"
     cv2.imwrite(str(photo_path), image)
     cv2.imwrite(str(warped_path), warped)
     cv2.imwrite(str(preview_path), preview)
+    cv2.imwrite(str(mask_path), warped_mask)
 
     project_store.update_project(
         project_id,
@@ -152,6 +157,7 @@ def update_board(
             "photo_path": str(photo_path),
             "warped_path": str(warped_path),
             "preview_path": str(preview_path),
+            "mask_path": str(mask_path),
         },
     )
     return {
@@ -161,6 +167,51 @@ def update_board(
         "filled_cells": int(filled.sum()),
         "gaps": gaps,
         "preview_path": str(preview_path),
+    }
+
+
+@app.post("/api/projects/{project_id}/locate")
+def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
+    metadata = project_store.get_project(project_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if metadata.get("status") != "calibrated":
+        raise HTTPException(status_code=409, detail="project must be calibrated first")
+    board_info = metadata.get("board")
+    if not board_info or not board_info.get("gaps"):
+        raise HTTPException(status_code=409, detail="board state is required before locating")
+    mask_path = board_info.get("mask_path")
+    if mask_path is None or not Path(mask_path).exists():
+        raise HTTPException(
+            status_code=409,
+            detail="board mask is missing; re-upload the board photo",
+        )
+
+    content = piece_photo.file.read()
+    image = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=422, detail="unreadable piece photo")
+
+    signature = piece.build_signature(image)
+    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise HTTPException(status_code=500, detail="board mask is unreadable")
+    rows = int(metadata["rows"])
+    cols = int(metadata["cols"])
+    gaps_with_edges = []
+    for gap in board_info["gaps"]:
+        edges = board.extract_receiving_edges(mask, rows, cols, int(gap["row"]), int(gap["col"]))
+        gaps_with_edges.append(
+            {"row": int(gap["row"]), "col": int(gap["col"]), "edges": edges}
+        )
+
+    started = time.perf_counter()
+    candidates = matcher.top_candidates(signature, gaps_with_edges, k=3)
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    return {
+        "project_id": project_id,
+        "candidates": candidates,
+        "latency_ms": latency_ms,
     }
 
 
