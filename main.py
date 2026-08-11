@@ -3,11 +3,14 @@
 Run locally with:  uvicorn main:app --reload
 """
 
+import json
+
 import cv2
+import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 from puzzle.db import projects as project_store
-from puzzle.vision import calibration
+from puzzle.vision import board, calibration
 
 app = FastAPI(title="Puzzle Assistant Backend", version="0.1.0")
 
@@ -97,6 +100,67 @@ def calibrate_project(project_id: str, payload: dict) -> dict:
         "cell_count": len(cells),
         "warped_width": int(warped.shape[1]),
         "warped_height": int(warped.shape[0]),
+    }
+
+
+@app.put("/api/projects/{project_id}/board")
+def update_board(
+    project_id: str,
+    board_photo: UploadFile = File(...),
+    corners: str = Form(...),
+) -> dict:
+    metadata = project_store.get_project(project_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if metadata.get("status") != "calibrated":
+        raise HTTPException(status_code=409, detail="project must be calibrated first")
+
+    try:
+        raw = json.loads(corners)
+        corner_points = [(float(x), float(y)) for x, y in raw]
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="corners must be four [x, y] pairs") from exc
+    if len(corner_points) != 4:
+        raise HTTPException(status_code=422, detail="corners must be four [x, y] pairs")
+
+    rows = int(metadata["rows"])
+    cols = int(metadata["cols"])
+    content = board_photo.file.read()
+    image = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=422, detail="unreadable board photo")
+
+    warped, warped_mask = board.align_board_to_grid(image, corner_points, rows, cols)
+    filled = board.classify_cells(warped_mask, rows, cols)
+    gaps = board.find_gaps(filled)
+    preview = board.render_gap_preview(warped, filled, gaps, rows, cols)
+
+    directory = project_store.project_dir(project_id)
+    photo_path = directory / "board_photo.jpg"
+    warped_path = directory / "board_warped.jpg"
+    preview_path = directory / "board_preview.jpg"
+    cv2.imwrite(str(photo_path), image)
+    cv2.imwrite(str(warped_path), warped)
+    cv2.imwrite(str(preview_path), preview)
+
+    project_store.update_project(
+        project_id,
+        board={
+            "corners": [[float(x), float(y)] for x, y in corner_points],
+            "filled_cells": int(filled.sum()),
+            "gaps": gaps,
+            "photo_path": str(photo_path),
+            "warped_path": str(warped_path),
+            "preview_path": str(preview_path),
+        },
+    )
+    return {
+        "project_id": project_id,
+        "rows": rows,
+        "cols": cols,
+        "filled_cells": int(filled.sum()),
+        "gaps": gaps,
+        "preview_path": str(preview_path),
     }
 
 
