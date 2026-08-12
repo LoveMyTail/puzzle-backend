@@ -4,6 +4,8 @@ Run locally with:  uvicorn main:app --reload
 """
 
 import json
+import logging
+import os
 import time
 from pathlib import Path
 
@@ -14,6 +16,30 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from puzzle.db import projects as project_store
 from puzzle.solver import matcher
 from puzzle.vision import board, calibration, piece
+
+
+def _configure_logging() -> logging.Logger:
+    """Configure the ``puzzle`` logger with an independent stderr handler.
+
+    Level comes from the ``PUZZLE_LOG_LEVEL`` env var (default INFO); DEBUG
+    additionally emits one line per evaluated gap in the matcher. Keeping the
+    handler on the ``puzzle`` logger (with ``propagate=False``) makes the
+    matching logs predictable regardless of uvicorn's own log configuration.
+    """
+    level = os.environ.get("PUZZLE_LOG_LEVEL", "INFO").upper()
+    puzzle_logger = logging.getLogger("puzzle")
+    if not puzzle_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        puzzle_logger.addHandler(handler)
+    puzzle_logger.setLevel(level)
+    puzzle_logger.propagate = False
+    return puzzle_logger
+
+
+logger = _configure_logging()
 
 app = FastAPI(title="Puzzle Assistant Backend", version="0.1.0")
 
@@ -173,63 +199,118 @@ def update_board(
 
 @app.post("/api/projects/{project_id}/locate")
 def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
-    metadata = project_store.get_project(project_id)
-    if metadata is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    if metadata.get("status") != "calibrated":
-        raise HTTPException(status_code=409, detail="project must be calibrated first")
-    board_info = metadata.get("board")
-    if not board_info or not board_info.get("gaps"):
-        raise HTTPException(status_code=409, detail="board state is required before locating")
-    mask_path = board_info.get("mask_path")
-    if mask_path is None or not Path(mask_path).exists():
-        raise HTTPException(
-            status_code=409,
-            detail="board mask is missing; re-upload the board photo",
-        )
-
     content = piece_photo.file.read()
-    image = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=422, detail="unreadable piece photo")
+    logger.info(
+        "piece_match_start project=%s photo_bytes=%d",
+        project_id,
+        len(content),
+    )
+    started_all = time.perf_counter()
+    try:
+        metadata = project_store.get_project(project_id)
+        if metadata is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if metadata.get("status") != "calibrated":
+            raise HTTPException(
+                status_code=409, detail="project must be calibrated first"
+            )
+        board_info = metadata.get("board")
+        if not board_info or not board_info.get("gaps"):
+            raise HTTPException(
+                status_code=409,
+                detail="board state is required before locating",
+            )
+        mask_path = board_info.get("mask_path")
+        if mask_path is None or not Path(mask_path).exists():
+            raise HTTPException(
+                status_code=409,
+                detail="board mask is missing; re-upload the board photo",
+            )
 
-    signature = piece.build_signature(image)
-    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-    if mask is None:
-        raise HTTPException(status_code=500, detail="board mask is unreadable")
-    rows = int(metadata["rows"])
-    cols = int(metadata["cols"])
-    stored_px = board_info.get("cell_px")
-    if stored_px is not None:
-        cell_px = int(stored_px)
-    elif mask.shape[1] % cols == 0:
-        cell_px = mask.shape[1] // cols
-    else:
-        cell_px = board.CELL_PX
-    filled = board.classify_cells(mask, rows, cols, cell_px=cell_px)
-    gaps_with_edges = []
-    for gap in board_info["gaps"]:
-        edges = board.extract_receiving_edges(
-            mask,
-            rows,
-            cols,
-            int(gap["row"]),
-            int(gap["col"]),
-            cell_px=cell_px,
-            filled=filled,
+        image = cv2.imdecode(
+            np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR
         )
-        gaps_with_edges.append(
-            {"row": int(gap["row"]), "col": int(gap["col"]), "edges": edges}
+        if image is None:
+            raise HTTPException(status_code=422, detail="unreadable piece photo")
+
+        signature = piece.build_signature(image)
+        logger.info(
+            "piece_signature project=%s contour_points=%d side_lengths=%s",
+            project_id,
+            len(signature.contour),
+            [round(float(length), 1) for length in signature.side_lengths],
         )
 
-    started = time.perf_counter()
-    candidates = matcher.top_candidates(signature, gaps_with_edges, k=3)
-    latency_ms = round((time.perf_counter() - started) * 1000, 1)
-    return {
-        "project_id": project_id,
-        "candidates": candidates,
-        "latency_ms": latency_ms,
-    }
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise HTTPException(status_code=500, detail="board mask is unreadable")
+        rows = int(metadata["rows"])
+        cols = int(metadata["cols"])
+        stored_px = board_info.get("cell_px")
+        if stored_px is not None:
+            cell_px = int(stored_px)
+        elif mask.shape[1] % cols == 0:
+            cell_px = mask.shape[1] // cols
+        else:
+            cell_px = board.CELL_PX
+        filled = board.classify_cells(mask, rows, cols, cell_px=cell_px)
+        gaps_with_edges = []
+        for gap in board_info["gaps"]:
+            edges = board.extract_receiving_edges(
+                mask,
+                rows,
+                cols,
+                int(gap["row"]),
+                int(gap["col"]),
+                cell_px=cell_px,
+                filled=filled,
+            )
+            gaps_with_edges.append(
+                {"row": int(gap["row"]), "col": int(gap["col"]), "edges": edges}
+            )
+        logger.info(
+            "piece_match_gaps project=%s gaps=%d receiving_edges=%d",
+            project_id,
+            len(gaps_with_edges),
+            sum(len(gap["edges"]) for gap in gaps_with_edges),
+        )
+
+        started = time.perf_counter()
+        candidates = matcher.top_candidates(signature, gaps_with_edges, k=3)
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        total_ms = round((time.perf_counter() - started_all) * 1000, 1)
+        logger.info(
+            "piece_match_done project=%s candidates=%s match_latency_ms=%.1f "
+            "total_ms=%.1f",
+            project_id,
+            [
+                {
+                    "row": candidate["row"],
+                    "col": candidate["col"],
+                    "score": round(candidate["score"], 4),
+                    "rotation": candidate["rotation"],
+                    "confidence": round(candidate["confidence"], 3),
+                }
+                for candidate in candidates
+            ],
+            latency_ms,
+            total_ms,
+        )
+        return {
+            "project_id": project_id,
+            "candidates": candidates,
+            "latency_ms": latency_ms,
+        }
+    except HTTPException as exc:
+        logger.warning(
+            "piece_match_aborted project=%s reason=%s",
+            project_id,
+            exc.detail,
+        )
+        raise
+    except Exception:
+        logger.exception("piece_match_failed project=%s", project_id)
+        raise
 
 
 @app.get("/api/projects/{project_id}")

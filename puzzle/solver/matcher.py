@@ -7,11 +7,14 @@ with normalized confidence scores.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 
 import numpy as np
 
 from puzzle.vision.piece import SIDE_SAMPLES, PieceSignature, resample_contour, side_profile
+
+logger = logging.getLogger("puzzle.matcher")
 
 DIRECTIONS = {"top": 0, "right": 1, "bottom": 2, "left": 3}
 
@@ -60,6 +63,14 @@ def score_gaps(signature: PieceSignature, gaps_with_edges: list[dict]) -> list[d
     for gap in gaps_with_edges:
         edges = gap.get("edges") or {}
         score, rotation = match_gap(signature, edges)
+        logger.debug(
+            "gap_score row=%d col=%d directions=%d score=%s rotation=%d",
+            gap["row"],
+            gap["col"],
+            len(edges),
+            f"{score:.4f}" if np.isfinite(score) else "inf",
+            rotation,
+        )
         results.append(
             {"row": gap["row"], "col": gap["col"], "score": score, "rotation": rotation}
         )
