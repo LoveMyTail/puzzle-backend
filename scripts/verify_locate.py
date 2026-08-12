@@ -48,7 +48,12 @@ def main() -> None:
     gaps_with_edges = []
     for gap in gaps:
         edges = board.extract_receiving_edges(
-            warped_mask, args.rows, args.cols, gap["row"], gap["col"]
+            warped_mask,
+            args.rows,
+            args.cols,
+            gap["row"],
+            gap["col"],
+            filled=filled,
         )
         gaps_with_edges.append({**gap, "edges": edges})
 

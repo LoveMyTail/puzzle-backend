@@ -1,8 +1,11 @@
 """Unit tests for board-state processing (M2)."""
 
+import math
+
 import cv2
 import numpy as np
 
+from puzzle.solver.matcher import edge_profile
 from puzzle.vision.board import (
     CELL_PX,
     align_board_to_grid,
@@ -51,12 +54,53 @@ def test_classify_cells_matches_drawn_region() -> None:
 
 
 def test_extract_receiving_edges_on_top_and_right() -> None:
-    mask = _filled_mask()
-    edges = extract_receiving_edges(mask, 10, 12, row_1based=5, col_1based=2)
+    mask = np.zeros((6 * CELL_PX, 6 * CELL_PX), dtype=np.uint8)
+    for row in range(1, 4):
+        for col in range(1, 4):
+            if row == 3 and col == 1:
+                continue  # leave the gap itself empty
+            mask[
+                row * CELL_PX : (row + 1) * CELL_PX,
+                col * CELL_PX : (col + 1) * CELL_PX,
+            ] = 255
+    filled = classify_cells(mask, 6, 6)
+    edges = extract_receiving_edges(
+        mask, 6, 6, row_1based=4, col_1based=2, filled=filled
+    )
     assert "top" in edges and len(edges["top"]) == CELL_PX
-    assert all(y == 4 * CELL_PX - 1 for (_, y) in edges["top"])
+    assert all(y == 3 * CELL_PX - 1 for (_, y) in edges["top"])
     assert "right" in edges and len(edges["right"]) == CELL_PX
     assert all(x == 2 * CELL_PX for (x, _) in edges["right"])
+    assert "left" not in edges and "bottom" not in edges
+
+
+def test_receiving_edges_preserve_tab_shape() -> None:
+    """A neighbor tab protruding into a gap must survive edge extraction."""
+    mask = np.zeros((5 * CELL_PX, 5 * CELL_PX), dtype=np.uint8)
+    for row in range(2):
+        for col in range(2):
+            mask[
+                row * CELL_PX : (row + 1) * CELL_PX,
+                col * CELL_PX : (col + 1) * CELL_PX,
+            ] = 255
+    amp = CELL_PX * 0.18
+    x0, y0 = CELL_PX, 2 * CELL_PX
+    tab = np.array(
+        [
+            (x0 + CELL_PX * (i / 79), y0 - 1 + amp * math.sin(math.pi * i / 79))
+            for i in range(80)
+        ],
+        dtype=np.float32,
+    )
+    cv2.fillPoly(mask, [tab.astype(np.int32)], 255)
+
+    filled = classify_cells(mask, 5, 5)
+    edges = extract_receiving_edges(
+        mask, 5, 5, row_1based=3, col_1based=2, filled=filled
+    )
+    profile = edge_profile(np.asarray(edges["top"], dtype=np.float32))
+    assert abs(profile).max() > 1e-6  # shape signal must not collapse to zero
+    assert max(y for _, y in edges["top"]) >= y0 - 1 + amp * 0.9
 
 
 def test_align_board_to_grid_recovers_layout() -> None:

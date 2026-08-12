@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from puzzle.solver.matcher import edge_distance, edge_profile, match_gap, top_candidates
+from puzzle.vision.board import CELL_PX, classify_cells, extract_receiving_edges, find_gaps
 from puzzle.vision.piece import SIDE_SAMPLES, build_signature, split_sides
 
 
@@ -44,6 +45,40 @@ def _piece_image(size: int = 120, distinct: bool = False) -> np.ndarray:
     polygon = (_piece_polygon(size, tab, distinct) + np.array([pad, pad])).astype(np.int32)
     cv2.fillPoly(image, [polygon], (30, 30, 30))
     return image
+
+
+def _piece_image_with_top_blank(size: int = CELL_PX, tab: float = 0.18) -> np.ndarray:
+    """Square piece whose top side dips down (a blank), other sides distinct."""
+    amp = size * tab
+    pad = int(math.ceil(amp)) + 6
+    points: list[tuple[float, float]] = []
+    per_side = 40
+    for i in range(per_side):
+        t = i / (per_side - 1)
+        points.append((size * t, amp * math.sin(math.pi * t)))
+    for i in range(per_side):
+        t = i / (per_side - 1)
+        points.append((size + 0.8 * amp * math.sin(math.pi * t), size * t))
+    for i in range(per_side):
+        t = i / (per_side - 1)
+        points.append((size * (1 - t), size + 1.2 * amp * math.sin(math.pi * t)))
+    for i in range(per_side):
+        t = i / (per_side - 1)
+        points.append((0.6 * amp * math.sin(math.pi * t), size * (1 - t)))
+    polygon = (np.asarray(points, dtype=np.float32) + np.array([pad, pad])).astype(np.int32)
+    image = np.full((size + 2 * pad, size + 2 * pad, 3), 255, dtype=np.uint8)
+    cv2.fillPoly(image, [polygon], (30, 30, 30))
+    return image
+
+
+def _tab_polygon(x0: float, y0: float, width: float, amp: float) -> np.ndarray:
+    return np.array(
+        [
+            (x0 + width * (i / 79), y0 + amp * math.sin(math.pi * i / 79))
+            for i in range(80)
+        ],
+        dtype=np.float32,
+    )
 
 
 def test_edge_distance_handles_mirror() -> None:
@@ -89,3 +124,49 @@ def test_top_candidates_orders_matching_gap_first() -> None:
     assert top[0]["score"] < top[1]["score"]
     assert top[0]["confidence"] > top[1]["confidence"]
     assert abs(sum(candidate["confidence"] for candidate in top) - 1.0) < 1e-6
+
+
+def test_real_chain_ranks_true_gap_first() -> None:
+    """End-to-end regression: board mask -> receiving edges -> matcher.
+
+    Previously the receiving edge collapsed to an all-zero profile, so the
+    matcher could not distinguish the true gap. With tab-preserving edge
+    extraction, the gap below a tabbed neighbor must rank first.
+    """
+    from puzzle.solver.matcher import score_gaps
+
+    size = CELL_PX
+    amp = size * 0.18
+    mask = np.zeros((4 * size, 4 * size), dtype=np.uint8)
+    for row in range(2):
+        for col in range(2):
+            mask[
+                row * size : (row + 1) * size,
+                col * size : (col + 1) * size,
+            ] = 255
+    # Tab on the bottom of cell (1,1) (0-based), protruding into gap (3,2) (1-based).
+    tab = _tab_polygon(size, 2 * size - 1, size, amp)
+    cv2.fillPoly(mask, [tab.astype(np.int32)], 255)
+
+    filled = classify_cells(mask, 4, 4)
+    gaps = find_gaps(filled)
+    gaps_with_edges = [
+        {
+            **gap,
+            "edges": extract_receiving_edges(
+                mask, 4, 4, gap["row"], gap["col"], filled=filled
+            ),
+        }
+        for gap in gaps
+    ]
+    true_gap = next(g for g in gaps_with_edges if g["row"] == 3 and g["col"] == 2)
+    profile = edge_profile(np.asarray(true_gap["edges"]["top"], dtype=np.float32))
+    assert abs(profile).max() > 1e-6  # receiving edge carries shape information
+
+    signature = build_signature(_piece_image_with_top_blank())
+    ranked = score_gaps(signature, gaps_with_edges)
+    assert (ranked[0]["row"], ranked[0]["col"]) == (3, 2)
+    assert ranked[0]["score"] < 0.05
+
+    top = top_candidates(signature, gaps_with_edges, k=3)
+    assert (top[0]["row"], top[0]["col"]) == (3, 2)

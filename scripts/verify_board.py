@@ -7,9 +7,11 @@ import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from puzzle.solver import matcher
 from puzzle.vision import board
 
 
@@ -42,11 +44,23 @@ def main() -> None:
     filled = board.classify_cells(warped_mask, args.rows, args.cols)
     gaps = board.find_gaps(filled)
     preview = board.render_gap_preview(warped, filled, gaps, args.rows, args.cols)
+    total_profiles = 0
+    zero_profiles = 0
     for gap in gaps:
         edges = board.extract_receiving_edges(
-            warped_mask, args.rows, args.cols, gap["row"], gap["col"]
+            warped_mask,
+            args.rows,
+            args.cols,
+            gap["row"],
+            gap["col"],
+            filled=filled,
         )
         gap["edge_points"] = {direction: len(points) for direction, points in edges.items()}
+        for direction, points in edges.items():
+            profile = matcher.edge_profile(np.asarray(points, dtype=np.float32))
+            total_profiles += 1
+            if abs(profile).max() < 1e-9:
+                zero_profiles += 1
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -55,6 +69,10 @@ def main() -> None:
 
     print(f"filled cells: {int(filled.sum())} / {args.rows * args.cols}")
     print(f"gaps: {len(gaps)}")
+    print(
+        f"receiving edge profiles: {total_profiles} total, "
+        f"{zero_profiles} degenerate (all-zero) — tabs/blanks should keep this low"
+    )
     for gap in gaps:
         print(
             f"  row {gap['row']} col {gap['col']} neighbors={gap['directions']} "

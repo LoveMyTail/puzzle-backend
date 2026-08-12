@@ -3,6 +3,10 @@
 Implements the M2 milestone: given a photo of the partially assembled puzzle,
 align it to the reference grid, decide which cells are filled, and extract
 the "receiving edges" of every gap adjacent to filled cells.
+
+A receiving edge is the contour of a filled neighbor that faces the gap
+(including tabs/blanks protruding into it), not just the single boundary
+line: the neighbor's shape is what the matcher compares against a piece side.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from collections.abc import Sequence
 import cv2
 import numpy as np
 
-CELL_PX = 24
+CELL_PX = 64
 FILL_RATIO = 0.5
 Point = tuple[float, float]
 
@@ -122,30 +126,135 @@ def extract_receiving_edges(
     row_1based: int,
     col_1based: int,
     cell_px: int = CELL_PX,
+    filled: np.ndarray | None = None,
 ) -> dict[str, list[tuple[int, int]]]:
-    """Extract the filled neighbor contour facing a gap, per direction."""
+    """Extract the filled neighbor contour facing a gap, per direction.
+
+    For each filled neighbor, the receiving edge is the extreme contour of
+    that neighbor within a window spanning the shared boundary (the neighbor
+    cell plus half a cell into the gap). Sampling the extreme filled pixel
+    per scan line preserves tabs/blanks protruding into the gap, which are
+    the shape signal the matcher depends on.
+
+    ``filled`` is the boolean cell grid from :func:`classify_cells`; only
+    directions whose adjacent cell is filled produce an edge. When omitted it
+    is derived locally from the neighbor cell's own fill ratio.
+    """
     row = row_1based - 1
     col = col_1based - 1
     x0, y0 = col * cell_px, row * cell_px
     x1, y1 = x0 + cell_px, y0 + cell_px
+    height, width = mask.shape[:2]
     edges: dict[str, list[tuple[int, int]]] = {}
-    if row > 0:
-        pts = [(x, y0 - 1) for x in range(x0, x1) if mask[y0 - 1, x] > 0]
+    if row > 0 and _neighbor_filled(mask, row - 1, col, cell_px, filled):
+        pts = _receiving_envelope(
+            mask,
+            rows=slice(max(0, y0 - cell_px), min(height, y0 + cell_px // 2)),
+            cols=slice(x0, min(width, x1)),
+            mode="bottom",
+        )
         if pts:
             edges["top"] = pts
-    if row < rows - 1:
-        pts = [(x, y1) for x in range(x0, x1) if mask[y1, x] > 0]
+    if row < rows - 1 and _neighbor_filled(mask, row + 1, col, cell_px, filled):
+        pts = _receiving_envelope(
+            mask,
+            rows=slice(max(0, y1 - cell_px // 2), min(height, y1 + cell_px)),
+            cols=slice(x0, min(width, x1)),
+            mode="top",
+        )
         if pts:
             edges["bottom"] = pts
-    if col > 0:
-        pts = [(x0 - 1, y) for y in range(y0, y1) if mask[y, x0 - 1] > 0]
+    if col > 0 and _neighbor_filled(mask, row, col - 1, cell_px, filled):
+        pts = _receiving_envelope(
+            mask,
+            rows=slice(y0, min(height, y1)),
+            cols=slice(max(0, x0 - cell_px), min(width, x0 + cell_px // 2)),
+            mode="right",
+        )
         if pts:
             edges["left"] = pts
-    if col < cols - 1:
-        pts = [(x1, y) for y in range(y0, y1) if mask[y, x1] > 0]
+    if col < cols - 1 and _neighbor_filled(mask, row, col + 1, cell_px, filled):
+        pts = _receiving_envelope(
+            mask,
+            rows=slice(y0, min(height, y1)),
+            cols=slice(max(0, x1 - cell_px // 2), min(width, x1 + cell_px)),
+            mode="left",
+        )
         if pts:
             edges["right"] = pts
     return edges
+
+
+def _neighbor_filled(
+    mask: np.ndarray,
+    row: int,
+    col: int,
+    cell_px: int,
+    filled: np.ndarray | None,
+) -> bool:
+    """Whether the neighbor cell is considered assembled."""
+    if filled is not None:
+        return bool(filled[row, col])
+    cell = mask[
+        row * cell_px : (row + 1) * cell_px,
+        col * cell_px : (col + 1) * cell_px,
+    ]
+    return cell.size > 0 and (cell > 0).mean() > FILL_RATIO
+
+
+def _receiving_envelope(
+    mask: np.ndarray,
+    rows: slice,
+    cols: slice,
+    mode: str,
+) -> list[tuple[int, int]]:
+    """Return the extreme filled pixels of the largest component in a window.
+
+    ``mode`` selects the extreme to keep per scan line:
+      - "bottom": deepest filled pixel per column (neighbor above a gap)
+      - "top":    highest filled pixel per column (neighbor below a gap)
+      - "right":  rightmost filled pixel per row (neighbor left of a gap)
+      - "left":   leftmost filled pixel per row (neighbor right of a gap)
+
+    Points are ordered along the boundary (x or y ascending), keeping the
+    orientation convention of ``side_profile`` consistent with piece sides.
+    """
+    window = mask[rows, cols]
+    if window.size == 0 or not np.any(window):
+        return []
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (window > 0).astype(np.uint8), connectivity=8
+    )
+    if num < 2:
+        return []
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    ys, xs = np.nonzero(labels == largest)
+    if xs.size == 0:
+        return []
+    extremes: dict[int, int] = {}
+    if mode in ("bottom", "top"):
+        for x, y in zip(xs, ys):
+            key = int(x)
+            if key not in extremes:
+                extremes[key] = int(y)
+            elif mode == "bottom" and y > extremes[key]:
+                extremes[key] = int(y)
+            elif mode == "top" and y < extremes[key]:
+                extremes[key] = int(y)
+        return [
+            (cols.start + x, rows.start + y) for x, y in sorted(extremes.items())
+        ]
+    for x, y in zip(xs, ys):
+        key = int(y)
+        if key not in extremes:
+            extremes[key] = int(x)
+        elif mode == "right" and x > extremes[key]:
+            extremes[key] = int(x)
+        elif mode == "left" and x < extremes[key]:
+            extremes[key] = int(x)
+    return [
+        (cols.start + x, rows.start + y) for y, x in sorted(extremes.items())
+    ]
 
 
 def render_gap_preview(

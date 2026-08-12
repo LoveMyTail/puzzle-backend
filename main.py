@@ -154,6 +154,7 @@ def update_board(
             "corners": [[float(x), float(y)] for x, y in corner_points],
             "filled_cells": int(filled.sum()),
             "gaps": gaps,
+            "cell_px": board.CELL_PX,
             "photo_path": str(photo_path),
             "warped_path": str(warped_path),
             "preview_path": str(preview_path),
@@ -198,9 +199,25 @@ def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=500, detail="board mask is unreadable")
     rows = int(metadata["rows"])
     cols = int(metadata["cols"])
+    stored_px = board_info.get("cell_px")
+    if stored_px is not None:
+        cell_px = int(stored_px)
+    elif mask.shape[1] % cols == 0:
+        cell_px = mask.shape[1] // cols
+    else:
+        cell_px = board.CELL_PX
+    filled = board.classify_cells(mask, rows, cols, cell_px=cell_px)
     gaps_with_edges = []
     for gap in board_info["gaps"]:
-        edges = board.extract_receiving_edges(mask, rows, cols, int(gap["row"]), int(gap["col"]))
+        edges = board.extract_receiving_edges(
+            mask,
+            rows,
+            cols,
+            int(gap["row"]),
+            int(gap["col"]),
+            cell_px=cell_px,
+            filled=filled,
+        )
         gaps_with_edges.append(
             {"row": int(gap["row"]), "col": int(gap["col"]), "edges": edges}
         )
@@ -221,3 +238,9 @@ def get_project(project_id: str) -> dict:
     if metadata is None:
         raise HTTPException(status_code=404, detail="project not found")
     return metadata
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)
