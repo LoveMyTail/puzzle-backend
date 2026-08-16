@@ -16,6 +16,7 @@ import numpy as np
 from puzzle.vision.board import segment_board
 
 SIDE_SAMPLES = 64
+MIN_SIDE_PX = 64  # shortest piece side in px; below this, tab/blank detail is lost
 
 
 @dataclass
@@ -135,6 +136,22 @@ def build_signature(
             for segment in segments
         ],
     )
+
+
+def validate_piece_resolution(
+    signature: PieceSignature, min_side_px: int = MIN_SIDE_PX
+) -> None:
+    """Raise ``ValueError`` when the piece is too small in the photo to match reliably.
+
+    Below ``MIN_SIDE_PX`` pixels per side, tab/blank detail is quantized away and
+    the profile stops being a faithful shape signature.
+    """
+    shortest = min(signature.side_lengths)
+    if shortest < min_side_px:
+        raise ValueError(
+            f"piece is too small in the photo: shortest side is {shortest:.0f}px, "
+            f"need at least {min_side_px}px; move the camera closer and retake"
+        )
 
 
 def rotated(signature: PieceSignature, k: int) -> PieceSignature:

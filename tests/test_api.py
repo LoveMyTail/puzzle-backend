@@ -70,22 +70,25 @@ def test_calibrate_unknown_project_returns_404(client: TestClient) -> None:
 
 def _board_photo_bytes() -> bytes:
     rows, cols = 10, 12
-    grid_h, grid_w = rows * 24, cols * 24
+    cell = 240  # px per cell in the rendered layout: realistic source resolution
+    grid_h, grid_w = rows * cell, cols * cell
     base = np.full((grid_h, grid_w, 3), 255, dtype=np.uint8)
     for row in range(1, 5):
         for col in range(1, 6):
-            x0, y0 = col * 24, row * 24
-            cv2.rectangle(base, (x0, y0), (x0 + 23, y0 + 23), (30, 130, 210), -1)
+            x0, y0 = col * cell, row * cell
+            cv2.rectangle(
+                base, (x0, y0), (x0 + cell - 1, y0 + cell - 1), (30, 130, 210), -1
+            )
     src = np.array(
         [[0, 0], [grid_w - 1, 0], [grid_w - 1, grid_h - 1], [0, grid_h - 1]],
         dtype=np.float32,
     )
-    dst = np.array([[30, 25], [470, 35], [475, 395], [20, 385]], dtype=np.float32)
+    dst = np.array([[30, 25], [3060, 40], [3070, 2580], [20, 2565]], dtype=np.float32)
     matrix = cv2.getPerspectiveTransform(src, dst)
     photo = cv2.warpPerspective(
         base,
         matrix,
-        (500, 420),
+        (3100, 2600),
         flags=cv2.INTER_NEAREST,
         borderValue=(255, 255, 255),
     )
@@ -102,7 +105,7 @@ def test_update_board_finds_gaps(client: TestClient) -> None:
     )
     assert resp.status_code == 200
 
-    corners = "[[30,25],[470,35],[475,395],[20,385]]"
+    corners = "[[30,25],[3060,40],[3070,2580],[20,2565]]"
     resp = client.put(
         f"/api/projects/{project_id}/board",
         files={"board_photo": ("board.jpg", _board_photo_bytes(), "image/jpeg")},
@@ -129,9 +132,35 @@ def test_update_board_requires_calibration(client: TestClient) -> None:
     assert resp.status_code == 409
 
 
+def test_update_board_rejects_low_resolution_photo(client: TestClient) -> None:
+    project_id = _create_project(client)["project_id"]
+    resp = client.put(
+        f"/api/projects/{project_id}/calibration",
+        json={"points": [[0, 0], [400, 0], [400, 300], [0, 300]]},
+    )
+    assert resp.status_code == 200
+    # The marked region spans only ~450px -> ~12px per cell on the 27x37 grid.
+    corners = "[[30,25],[470,35],[475,395],[20,385]]"
+    resp = client.put(
+        f"/api/projects/{project_id}/board",
+        files={"board_photo": ("board.jpg", _board_photo_bytes(), "image/jpeg")},
+        data={"corners": corners},
+    )
+    assert resp.status_code == 422
+    assert "resolution" in resp.json()["detail"].lower()
+
+
 def _piece_photo_bytes() -> bytes:
     image = np.full((200, 200, 3), 255, dtype=np.uint8)
     cv2.rectangle(image, (40, 40), (160, 160), (30, 30, 30), -1)
+    ok, buf = cv2.imencode(".jpg", image)
+    assert ok
+    return buf.tobytes()
+
+
+def _tiny_piece_photo_bytes() -> bytes:
+    image = np.full((64, 64, 3), 255, dtype=np.uint8)
+    cv2.rectangle(image, (24, 24), (40, 40), (30, 30, 30), -1)
     ok, buf = cv2.imencode(".jpg", image)
     assert ok
     return buf.tobytes()
@@ -147,7 +176,7 @@ def _prepare_located_project(client: TestClient) -> str:
     resp = client.put(
         f"/api/projects/{project_id}/board",
         files={"board_photo": ("board.jpg", _board_photo_bytes(), "image/jpeg")},
-        data={"corners": "[[30,25],[470,35],[475,395],[20,385]]"},
+        data={"corners": "[[30,25],[3060,40],[3070,2580],[20,2565]]"},
     )
     assert resp.status_code == 200
     return project_id
@@ -165,6 +194,16 @@ def test_locate_piece_returns_candidates(client: TestClient) -> None:
     for candidate in body["candidates"]:
         assert {"row", "col", "score", "confidence", "rotation"} <= set(candidate)
     assert body["latency_ms"] >= 0
+
+
+def test_locate_piece_rejects_tiny_piece(client: TestClient) -> None:
+    project_id = _prepare_located_project(client)
+    resp = client.post(
+        f"/api/projects/{project_id}/locate",
+        files={"piece_photo": ("piece.jpg", _tiny_piece_photo_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 422
+    assert "too small" in resp.json()["detail"].lower()
 
 
 def test_locate_requires_board_state(client: TestClient) -> None:

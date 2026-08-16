@@ -4,6 +4,7 @@ import math
 
 import cv2
 import numpy as np
+import pytest
 
 from puzzle.vision.piece import (
     SIDE_SAMPLES,
@@ -13,6 +14,7 @@ from puzzle.vision.piece import (
     segment_piece,
     side_distance,
     side_profile,
+    validate_piece_resolution,
 )
 
 
@@ -91,3 +93,9 @@ def test_side_profile_flip_negates_and_reverses() -> None:
     forward = side_profile(resampled)
     backward = side_profile(resampled[::-1])
     assert np.allclose(backward, -forward[::-1], atol=1e-5)
+
+
+def test_validate_piece_resolution_rejects_tiny_piece() -> None:
+    with pytest.raises(ValueError):
+        validate_piece_resolution(build_signature(_piece_image(24)))
+    validate_piece_resolution(build_signature(_piece_image(120)))  # must not raise

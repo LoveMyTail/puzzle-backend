@@ -4,16 +4,20 @@ import math
 
 import cv2
 import numpy as np
+import pytest
 
 from puzzle.solver.matcher import edge_profile
 from puzzle.vision.board import (
     CELL_PX,
+    MIN_SOURCE_CELL_PX,
     align_board_to_grid,
     classify_cells,
     extract_receiving_edges,
     find_gaps,
     render_gap_preview,
     segment_board,
+    source_cell_px,
+    validate_board_resolution,
 )
 
 
@@ -149,3 +153,20 @@ def test_render_gap_preview_returns_image() -> None:
     assert len(gaps) == 2
     preview = render_gap_preview(warped, filled, gaps, 8, 10)
     assert preview.shape == warped.shape
+
+
+def test_source_cell_px_measures_marked_region() -> None:
+    small = [(30, 25), (470, 35), (475, 395), (20, 385)]
+    big = [(30, 25), (3060, 40), (3070, 2580), (20, 2565)]
+    assert source_cell_px(small, 27, 37) < MIN_SOURCE_CELL_PX
+    assert source_cell_px(big, 27, 37) >= MIN_SOURCE_CELL_PX
+
+
+def test_validate_board_resolution_rejects_low_res() -> None:
+    small = [(30, 25), (470, 35), (475, 395), (20, 385)]
+    big = [(30, 25), (3060, 40), (3070, 2580), (20, 2565)]
+    with pytest.raises(ValueError):
+        validate_board_resolution(small, 27, 37)
+    assert validate_board_resolution(big, 27, 37) == pytest.approx(
+        source_cell_px(big, 27, 37)
+    )

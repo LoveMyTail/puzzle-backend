@@ -154,6 +154,13 @@ def update_board(
 
     rows = int(metadata["rows"])
     cols = int(metadata["cols"])
+    try:
+        board.validate_board_resolution(corner_points, rows, cols)
+    except ValueError as exc:
+        logger.warning(
+            "board_resolution_rejected project=%s reason=%s", project_id, exc
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     content = board_photo.file.read()
     image = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
@@ -234,6 +241,10 @@ def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
             raise HTTPException(status_code=422, detail="unreadable piece photo")
 
         signature = piece.build_signature(image)
+        try:
+            piece.validate_piece_resolution(signature)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         logger.info(
             "piece_signature project=%s contour_points=%d side_lengths=%s",
             project_id,

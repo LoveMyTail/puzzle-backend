@@ -18,6 +18,7 @@ import numpy as np
 
 CELL_PX = 64
 FILL_RATIO = 0.5
+MIN_SOURCE_CELL_PX = CELL_PX  # source photo must be at least as detailed as the grid
 Point = tuple[float, float]
 
 
@@ -55,6 +56,43 @@ def _ordered_points(corners: Sequence[Point]) -> np.ndarray:
     if points.shape != (4, 2):
         raise ValueError("each corner must be an (x, y) pair")
     return points
+
+
+def source_cell_px(corners: Sequence[Point], rows: int, cols: int) -> float:
+    """Pixels per grid cell that the marked board region provides in the photo.
+
+    Derived from the quadrilateral's average side lengths, matching how the
+    warped grid size is computed. The board photo is always warped onto the
+    fixed ``CELL_PX`` grid, so the source photo must be at least as detailed or
+    the receiving-edge shape signal is lost.
+    """
+    if rows < 1 or cols < 1:
+        raise ValueError("rows and cols must be positive")
+    tl, tr, br, bl = _ordered_points(corners)
+    top_w = float(np.linalg.norm(tr - tl))
+    bottom_w = float(np.linalg.norm(br - bl))
+    left_h = float(np.linalg.norm(bl - tl))
+    right_h = float(np.linalg.norm(br - tr))
+    width = (top_w + bottom_w) / 2
+    height = (left_h + right_h) / 2
+    return min(width / cols, height / rows)
+
+
+def validate_board_resolution(
+    corners: Sequence[Point],
+    rows: int,
+    cols: int,
+    min_cell_px: float = MIN_SOURCE_CELL_PX,
+) -> float:
+    """Raise ``ValueError`` when the board photo is too low-res; else return px/cell."""
+    px = source_cell_px(corners, rows, cols)
+    if px < min_cell_px:
+        raise ValueError(
+            f"board photo resolution too low: about {px:.0f}px per cell, need at "
+            f"least {min_cell_px:.0f}px; move the camera closer or use a "
+            f"higher-resolution photo"
+        )
+    return px
 
 
 def align_board_to_grid(
