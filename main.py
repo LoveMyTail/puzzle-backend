@@ -12,6 +12,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from puzzle.db import projects as project_store
 from puzzle.solver import matcher
@@ -307,10 +308,37 @@ def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
             latency_ms,
             total_ms,
         )
+        preview_url = None
+        warped_path = board_info.get("warped_path")
+        if warped_path and Path(warped_path).exists():
+            warped_image = cv2.imread(str(warped_path))
+            if warped_image is not None:
+                preview = board.render_candidate_preview(
+                    warped_image, candidates, cell_px=cell_px
+                )
+                locate_preview_path = (
+                    project_store.project_dir(project_id) / "locate_preview.jpg"
+                )
+                cv2.imwrite(str(locate_preview_path), preview)
+                project_store.update_project(
+                    project_id,
+                    board={
+                        **board_info,
+                        "locate_preview_path": str(locate_preview_path),
+                    },
+                )
+                preview_url = f"/api/projects/{project_id}/locate/preview"
+        if preview_url is None:
+            logger.warning(
+                "locate_preview_skipped project=%s reason=warped image missing",
+                project_id,
+            )
         return {
             "project_id": project_id,
             "candidates": candidates,
             "latency_ms": latency_ms,
+            "preview_url": preview_url,
+            "board_preview_url": f"/api/projects/{project_id}/board/preview",
         }
     except HTTPException as exc:
         logger.warning(
@@ -322,6 +350,36 @@ def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
     except Exception:
         logger.exception("piece_match_failed project=%s", project_id)
         raise
+
+
+@app.get("/api/projects/{project_id}/board/preview")
+def board_preview(project_id: str) -> FileResponse:
+    """Serve the gap-tinted board overview (filled cells green, gaps red)."""
+    metadata = project_store.get_project(project_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    board_info = metadata.get("board") or {}
+    path = board_info.get("preview_path")
+    if path is None or not Path(path).exists():
+        raise HTTPException(
+            status_code=404, detail="board preview not found; upload the board photo first"
+        )
+    return FileResponse(str(path), media_type="image/jpeg")
+
+
+@app.get("/api/projects/{project_id}/locate/preview")
+def locate_preview(project_id: str) -> FileResponse:
+    """Serve the last locate result: warped board with Top-1..3 gaps marked."""
+    metadata = project_store.get_project(project_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    board_info = metadata.get("board") or {}
+    path = board_info.get("locate_preview_path")
+    if path is None or not Path(path).exists():
+        raise HTTPException(
+            status_code=404, detail="locate preview not found; run locate first"
+        )
+    return FileResponse(str(path), media_type="image/jpeg")
 
 
 @app.get("/api/projects/{project_id}")

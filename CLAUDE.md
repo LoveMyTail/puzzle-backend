@@ -49,7 +49,7 @@
   - `score_gaps` / `top_candidates` 对所有缺口排序，返回带 softmin 置信度（温度 0.1）的 Top-3。
 - `puzzle/db/projects.py` — 轻量**基于文件**的存储（无数据库）：`data/projects/{project_id}/` 存放 `metadata.json` 以及上传/派生出的图片。数据目录默认为 `<repo>/data`，可通过 `PUZZLE_DATA_DIR` 覆盖。
 - `scripts/` — `verify_calibration.py`、`verify_board.py`、`verify_piece.py`、`verify_locate.py`：用真实照片对各阶段进行手工验证。
-- `tests/` — pytest 测试套件（42 个测试）：`test_smoke`、`test_calibration`、`test_board`、`test_piece`、`test_matcher`、`test_api`（通过 `TestClient` 做端到端测试）。测试用程序化方式合成碎片/板面（无图片 fixture）。
+- `tests/` — pytest 测试套件（48 个测试）：`test_smoke`、`test_calibration`、`test_board`、`test_piece`、`test_matcher`、`test_api`（通过 `TestClient` 做端到端测试）。测试用程序化方式合成碎片/板面（无图片 fixture）。
 
 ### API
 
@@ -59,7 +59,9 @@
 | `POST /api/projects` | 盒子照片、片数、成品尺寸（cm） | 创建项目，估算网格 |
 | `PUT /api/projects/{id}/calibration` | 项目存在 | 对盒子照片做 4 角点透视矫正，切分网格 |
 | `PUT /api/projects/{id}/board` | 已标定 | 板面照片对齐网格、判定已填格、找出缺口；**源照片每格像素低于配置下限（默认 16px）时返回 422** |
-| `POST /api/projects/{id}/locate` | 已标定且已上传板面 | 构建碎片签名、为各缺口打分、返回 Top-3 候选；**碎片最短边低于配置下限（默认 16px）时返回 422** |
+| `POST /api/projects/{id}/locate` | 已标定且已上传板面 | 构建碎片签名、为各缺口打分、返回 Top-3 候选；**碎片最短边低于配置下限（默认 16px）时返回 422**。响应含 `preview_url`（候选标注图）与 `board_preview_url`（板面总览图），供 APP 端"碎片图 + 板面标注图"并排展示 |
+| `GET /api/projects/{id}/board/preview` | 已上传板面 | 返回缺口标注的板面总览图（已填格绿、缺口红） |
+| `GET /api/projects/{id}/locate/preview` | 已执行过 locate | 返回最近一次定位结果：warped 板面 + Top-1..3 候选缺口数字标注（①绿 ②橙 ③红） |
 | `GET /api/projects/{id}` | 项目存在 | 读取 `metadata.json` |
 
 ### 关键不变量（修改代码时请牢记）

@@ -212,6 +212,23 @@ def test_locate_piece_returns_candidates(client: TestClient) -> None:
     for candidate in body["candidates"]:
         assert {"row", "col", "score", "confidence", "rotation"} <= set(candidate)
     assert body["latency_ms"] >= 0
+    # The visual answer: a board image with the candidate gaps marked, plus the
+    # overall board preview URL for the app to display next to the piece photo.
+    assert body["preview_url"] == f"/api/projects/{project_id}/locate/preview"
+    preview = client.get(body["preview_url"])
+    assert preview.status_code == 200
+    assert preview.headers["content-type"].startswith("image/")
+    board_preview = client.get(body["board_preview_url"])
+    assert board_preview.status_code == 200
+    assert board_preview.headers["content-type"].startswith("image/")
+
+
+def test_board_preview_missing_before_upload(client: TestClient) -> None:
+    project_id = _create_project(client)["project_id"]
+    resp = client.get(f"/api/projects/{project_id}/board/preview")
+    assert resp.status_code == 404
+    resp = client.get(f"/api/projects/{project_id}/locate/preview")
+    assert resp.status_code == 404
 
 
 def test_locate_piece_rejects_tiny_piece(client: TestClient) -> None:

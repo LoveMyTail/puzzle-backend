@@ -14,6 +14,7 @@ from puzzle.vision.board import (
     classify_cells,
     extract_receiving_edges,
     find_gaps,
+    render_candidate_preview,
     render_gap_preview,
     segment_board,
     source_cell_px,
@@ -153,6 +154,21 @@ def test_render_gap_preview_returns_image() -> None:
     assert len(gaps) == 2
     preview = render_gap_preview(warped, filled, gaps, 8, 10)
     assert preview.shape == warped.shape
+
+
+def test_render_candidate_preview_marks_cells() -> None:
+    warped = np.full((4 * CELL_PX, 5 * CELL_PX, 3), 255, dtype=np.uint8)
+    candidates = [
+        {"row": 2, "col": 3, "rotation": 0},
+        {"row": 4, "col": 5, "rotation": 2},
+    ]
+    preview = render_candidate_preview(warped, candidates)
+    assert preview.shape == warped.shape
+    assert not np.array_equal(preview, warped)  # markers were drawn
+    # The top-1 cell is tinted, not just outlined.
+    x0, y0 = 2 * CELL_PX, 1 * CELL_PX
+    tinted = preview[y0 : y0 + CELL_PX, x0 : x0 + CELL_PX]
+    assert not np.allclose(tinted, 255)
 
 
 def test_source_cell_px_measures_marked_region() -> None:

@@ -331,3 +331,48 @@ def render_gap_preview(
         y0 = (gap["row"] - 1) * cell_px
         cv2.rectangle(overlay, (x0, y0), (x0 + cell_px - 1, y0 + cell_px - 1), (60, 60, 230), -1)
     return cv2.addWeighted(overlay, 0.45, warped, 0.55, 0)
+
+
+_CANDIDATE_COLORS = [(60, 220, 90), (0, 165, 255), (0, 60, 255)]  # BGR: green, orange, red
+
+
+def render_candidate_preview(
+    warped: np.ndarray,
+    candidates: list[dict],
+    cell_px: int = CELL_PX,
+) -> np.ndarray:
+    """Return the warped board with the top candidates' gap cells marked 1..k.
+
+    ``candidates`` must be ordered best-first (as returned by
+    :func:`puzzle.solver.matcher.top_candidates`); each dict needs 1-based
+    ``row``/``col``. This is the visual answer for the app: "your piece most
+    likely goes in the highlighted hole".
+    """
+    height, width = warped.shape[:2]
+    base = warped.copy()
+    for rank, candidate in enumerate(candidates, start=1):
+        x0 = max(0, (candidate["col"] - 1) * cell_px)
+        y0 = max(0, (candidate["row"] - 1) * cell_px)
+        x1 = min(width - 1, x0 + cell_px - 1)
+        y1 = min(height - 1, y0 + cell_px - 1)
+        color = _CANDIDATE_COLORS[(rank - 1) % len(_CANDIDATE_COLORS)]
+        cv2.rectangle(base, (x0, y0), (x1, y1), color, -1)
+    overlay = cv2.addWeighted(base, 0.4, warped, 0.6, 0)
+    for rank, candidate in enumerate(candidates, start=1):
+        x0 = max(0, (candidate["col"] - 1) * cell_px)
+        y0 = max(0, (candidate["row"] - 1) * cell_px)
+        x1 = min(width - 1, x0 + cell_px - 1)
+        y1 = min(height - 1, y0 + cell_px - 1)
+        color = _CANDIDATE_COLORS[(rank - 1) % len(_CANDIDATE_COLORS)]
+        cv2.rectangle(overlay, (x0, y0), (x1, y1), color, 3)
+        cx = (x0 + x1) // 2
+        cy = (y0 + y1) // 2
+        cv2.putText(
+            overlay, str(rank), (cx - 10, cy + 12), cv2.FONT_HERSHEY_SIMPLEX,
+            1.2, (0, 0, 0), 5, cv2.LINE_AA,
+        )
+        cv2.putText(
+            overlay, str(rank), (cx - 10, cy + 12), cv2.FONT_HERSHEY_SIMPLEX,
+            1.2, (255, 255, 255), 2, cv2.LINE_AA,
+        )
+    return overlay
