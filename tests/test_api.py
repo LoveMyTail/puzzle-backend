@@ -150,6 +150,24 @@ def test_update_board_rejects_low_resolution_photo(client: TestClient) -> None:
     assert "resolution" in resp.json()["detail"].lower()
 
 
+def test_update_board_accepts_moderate_resolution_photo(client: TestClient) -> None:
+    project_id = _create_project(client)["project_id"]
+    resp = client.put(
+        f"/api/projects/{project_id}/calibration",
+        json={"points": [[0, 0], [400, 0], [400, 300], [0, 300]]},
+    )
+    assert resp.status_code == 200
+    # ~22 px per cell on the 27x37 grid: above the default 16px floor.
+    corners = "[[30,25],[820,35],[825,685],[20,675]]"
+    resp = client.put(
+        f"/api/projects/{project_id}/board",
+        files={"board_photo": ("board.jpg", _board_photo_bytes(), "image/jpeg")},
+        data={"corners": corners},
+    )
+    assert resp.status_code == 200
+    assert "gaps" in resp.json()
+
+
 def _piece_photo_bytes() -> bytes:
     image = np.full((200, 200, 3), 255, dtype=np.uint8)
     cv2.rectangle(image, (40, 40), (160, 160), (30, 30, 30), -1)
@@ -160,7 +178,7 @@ def _piece_photo_bytes() -> bytes:
 
 def _tiny_piece_photo_bytes() -> bytes:
     image = np.full((64, 64, 3), 255, dtype=np.uint8)
-    cv2.rectangle(image, (24, 24), (40, 40), (30, 30, 30), -1)
+    cv2.rectangle(image, (26, 26), (38, 38), (30, 30, 30), -1)
     ok, buf = cv2.imencode(".jpg", image)
     assert ok
     return buf.tobytes()

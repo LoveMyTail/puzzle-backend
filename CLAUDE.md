@@ -41,7 +41,7 @@
 - `puzzle/vision/` — 图像处理（OpenCV）：
   - `calibration.py`（M1）— `estimate_grid`（根据片数与宽高比估算行/列数）、`warp_box_photo`（根据 4 个标注角点对盒子封面做透视矫正）、`slice_grid`、`draw_grid_overlay`。
   - `board.py`（M2）— `segment_board`（背景取图像边框像素的中位数，与背景颜色距离超过 `color_distance=40` 的像素视为拼图）、`align_board_to_grid`（把照片和掩膜 warp 到 `CELL_PX=64` 像素/格的固定网格）、`classify_cells`（覆盖率 ≥ `FILL_RATIO=0.5` 判定为已填）、`find_gaps`（与已填格相邻的空格）、`extract_receiving_edges`（在"邻居格 + 半个缺口"窗口内按扫描线取极值填充像素——保留凸入缺口的榫/槽形状）、`render_gap_preview`。
-  - `piece.py`（M3）— `segment_piece`（取最大连通分量）、`piece_contour`、`split_sides`（以 `minAreaRect` 角点为切点分成四条边）、`resample_contour`（按弧长重采样为 `SIDE_SAMPLES=64` 个点）、`side_profile`（采样点到弦的有符号距离，除以弦长归一化 → 对平移/旋转/均匀缩放不变）、`build_signature`、`validate_piece_resolution`（拒绝最短边小于 `MIN_SIDE_PX=64` 的碎片）。
+  - `piece.py`（M3）— `segment_piece`（取最大连通分量）、`piece_contour`、`split_sides`（以 `minAreaRect` 角点为切点分成四条边）、`resample_contour`（按弧长重采样为 `SIDE_SAMPLES=64` 个点）、`side_profile`（采样点到弦的有符号距离，除以弦长归一化 → 对平移/旋转/均匀缩放不变）、`build_signature`、`validate_piece_resolution`（拒绝最短边低于配置下限的碎片，`MIN_SIDE_PX` 默认 16px，可用环境变量 `PUZZLE_MIN_SIDE_PX` 覆盖）。
 - `puzzle/solver/matcher.py`（M4）— 缺口匹配：
   - `edge_profile` 把缺口接收边编码为与碎片边完全相同的特征。
   - `edge_distance` 取 `min(direct, mirrored)` 平均绝对差——碎片边与其邻居的接收边互为镜像，因此两种朝向都会尝试。
@@ -58,13 +58,13 @@
 | `GET /health` | — | 存活检查 |
 | `POST /api/projects` | 盒子照片、片数、成品尺寸（cm） | 创建项目，估算网格 |
 | `PUT /api/projects/{id}/calibration` | 项目存在 | 对盒子照片做 4 角点透视矫正，切分网格 |
-| `PUT /api/projects/{id}/board` | 已标定 | 板面照片对齐网格、判定已填格、找出缺口；**源照片每格 < 64 px 时返回 422** |
-| `POST /api/projects/{id}/locate` | 已标定且已上传板面 | 构建碎片签名、为各缺口打分、返回 Top-3 候选；**碎片边 < 64 px 时返回 422** |
+| `PUT /api/projects/{id}/board` | 已标定 | 板面照片对齐网格、判定已填格、找出缺口；**源照片每格像素低于配置下限（默认 16px）时返回 422** |
+| `POST /api/projects/{id}/locate` | 已标定且已上传板面 | 构建碎片签名、为各缺口打分、返回 Top-3 候选；**碎片最短边低于配置下限（默认 16px）时返回 422** |
 | `GET /api/projects/{id}` | 项目存在 | 读取 `metadata.json` |
 
 ### 关键不变量（修改代码时请牢记）
 
-- **尺度不变性是设计契约。** 每个特征都经过弦归一化并按弧长重采样为固定的 64 个点，板面也始终 warp 到固定的 64 px/格网格，因此照片的绝对尺寸会被抵消。分辨率守卫（`MIN_SIDE_PX`、`MIN_SOURCE_CELL_PX`，均为 64）保护着榫/槽细节被量化丢失之下的保真度下限——请保持它们与 `CELL_PX` / `SIDE_SAMPLES` 一致。
+- **尺度不变性是设计契约。** 每个特征都经过弦归一化并按弧长重采样为固定的 64 个点，板面也始终 warp 到固定的 64 px/格网格，因此照片的绝对尺寸会被抵消。分辨率守卫（`MIN_SIDE_PX`、`MIN_SOURCE_CELL_PX`，默认 16px）保护着榫/槽细节被量化丢失之下的保真度下限；可用环境变量 `PUZZLE_MIN_SIDE_PX` / `PUZZLE_MIN_CELL_PX` 调严（如 64px）。默认值刻意低于 `CELL_PX` / `SIDE_SAMPLES`（64），以兼容低分辨率拍摄（如模拟器），代价是匹配余量变小。
 - **接收边必须携带邻居的榫/槽形状**，而不只是边界线；匹配器依赖这一点（`test_real_chain_ranks_true_gap_first` 是对此的回归测试）。
 - **缺口坐标是 1-based**（API 与 `find_gaps` 输出中的行/列）；vision 代码内部会转换为 0-based。
 - 在没有重新审视项目概述之前，不要给匹配器引入颜色/纹理特征——纯形状方案是刻意为之。

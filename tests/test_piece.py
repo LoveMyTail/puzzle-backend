@@ -97,5 +97,14 @@ def test_side_profile_flip_negates_and_reverses() -> None:
 
 def test_validate_piece_resolution_rejects_tiny_piece() -> None:
     with pytest.raises(ValueError):
-        validate_piece_resolution(build_signature(_piece_image(24)))
+        validate_piece_resolution(build_signature(_piece_image(12)))
     validate_piece_resolution(build_signature(_piece_image(120)))  # must not raise
+
+
+def test_validate_piece_resolution_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PUZZLE_MIN_SIDE_PX", "64")
+    with pytest.raises(ValueError):
+        validate_piece_resolution(build_signature(_piece_image(24)))
+    validate_piece_resolution(build_signature(_piece_image(120)))  # 120 >= 64

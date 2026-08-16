@@ -8,6 +8,7 @@ side-order shifts, ready for gap matching in the next milestone.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import cv2
@@ -16,7 +17,7 @@ import numpy as np
 from puzzle.vision.board import segment_board
 
 SIDE_SAMPLES = 64
-MIN_SIDE_PX = 64  # shortest piece side in px; below this, tab/blank detail is lost
+MIN_SIDE_PX = 16  # default shortest-side floor (px); below this, tab/blank detail is lost
 
 
 @dataclass
@@ -139,13 +140,17 @@ def build_signature(
 
 
 def validate_piece_resolution(
-    signature: PieceSignature, min_side_px: int = MIN_SIDE_PX
+    signature: PieceSignature, min_side_px: int | None = None
 ) -> None:
     """Raise ``ValueError`` when the piece is too small in the photo to match reliably.
 
-    Below ``MIN_SIDE_PX`` pixels per side, tab/blank detail is quantized away and
-    the profile stops being a faithful shape signature.
+    The threshold defaults to ``MIN_SIDE_PX`` and can be overridden with the
+    ``PUZZLE_MIN_SIDE_PX`` environment variable (e.g. ``64`` for strict
+    matching). Below it, tab/blank detail is quantized away and the profile
+    stops being a faithful shape signature.
     """
+    if min_side_px is None:
+        min_side_px = int(os.environ.get("PUZZLE_MIN_SIDE_PX", MIN_SIDE_PX))
     shortest = min(signature.side_lengths)
     if shortest < min_side_px:
         raise ValueError(

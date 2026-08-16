@@ -170,3 +170,22 @@ def test_validate_board_resolution_rejects_low_res() -> None:
     assert validate_board_resolution(big, 27, 37) == pytest.approx(
         source_cell_px(big, 27, 37)
     )
+
+
+def test_validate_board_resolution_default_threshold() -> None:
+    small = [(30, 25), (470, 35), (475, 395), (20, 385)]  # ~12 px/cell: rejected
+    medium = [(30, 25), (740, 35), (745, 615), (20, 605)]  # ~19 px/cell: accepted
+    with pytest.raises(ValueError):
+        validate_board_resolution(small, 27, 37)
+    assert validate_board_resolution(medium, 27, 37) == pytest.approx(
+        source_cell_px(medium, 27, 37)
+    )
+
+
+def test_validate_board_resolution_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    medium = [(30, 25), (740, 35), (745, 615), (20, 605)]
+    monkeypatch.setenv("PUZZLE_MIN_CELL_PX", "64")
+    with pytest.raises(ValueError):
+        validate_board_resolution(medium, 27, 37)

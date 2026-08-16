@@ -11,6 +11,7 @@ line: the neighbor's shape is what the matcher compares against a piece side.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 
 import cv2
@@ -18,7 +19,7 @@ import numpy as np
 
 CELL_PX = 64
 FILL_RATIO = 0.5
-MIN_SOURCE_CELL_PX = CELL_PX  # source photo must be at least as detailed as the grid
+MIN_SOURCE_CELL_PX = 16  # default source-photo resolution floor (px per grid cell)
 Point = tuple[float, float]
 
 
@@ -82,9 +83,17 @@ def validate_board_resolution(
     corners: Sequence[Point],
     rows: int,
     cols: int,
-    min_cell_px: float = MIN_SOURCE_CELL_PX,
+    min_cell_px: float | None = None,
 ) -> float:
-    """Raise ``ValueError`` when the board photo is too low-res; else return px/cell."""
+    """Raise ``ValueError`` when the board photo is too low-res; else return px/cell.
+
+    The threshold defaults to ``MIN_SOURCE_CELL_PX`` and can be overridden with
+    the ``PUZZLE_MIN_CELL_PX`` environment variable (e.g. ``64`` for strict
+    matching). Below it, the receiving-edge shape signal is too coarse for the
+    matcher to separate the true gap reliably.
+    """
+    if min_cell_px is None:
+        min_cell_px = float(os.environ.get("PUZZLE_MIN_CELL_PX", MIN_SOURCE_CELL_PX))
     px = source_cell_px(corners, rows, cols)
     if px < min_cell_px:
         raise ValueError(
