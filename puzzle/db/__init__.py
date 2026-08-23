@@ -1,1 +1,1 @@
-"""Persistence: storage for piece fingerprints and board state."""
+"""Persistence: project metadata, piece fingerprints, and board state."""
