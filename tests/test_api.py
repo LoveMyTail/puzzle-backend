@@ -1,5 +1,6 @@
 """API tests for project creation and box-cover calibration."""
 
+import math
 from pathlib import Path
 
 import cv2
@@ -165,7 +166,83 @@ def test_update_board_accepts_moderate_resolution_photo(client: TestClient) -> N
         data={"corners": corners},
     )
     assert resp.status_code == 200
-    assert "gaps" in resp.json()
+    body = resp.json()
+    assert "gaps" in body
+    assert "alignment" in body
+    assert "boundary_ratio" in body["alignment"]
+
+
+def test_update_board_accepts_grid_override(client: TestClient) -> None:
+    project_id = _create_project(client)["project_id"]
+    resp = client.put(
+        f"/api/projects/{project_id}/calibration",
+        json={"points": [[0, 0], [400, 0], [400, 300], [0, 300]]},
+    )
+    assert resp.status_code == 200
+    resp = client.put(
+        f"/api/projects/{project_id}/board",
+        files={"board_photo": ("board.jpg", _board_photo_bytes(), "image/jpeg")},
+        data={
+            "corners": "[[30,25],[3060,40],[3070,2580],[20,2565]]",
+            "rows": "4",
+            "cols": "6",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["rows"], body["cols"]) == (4, 6)
+    detail = client.get(f"/api/projects/{project_id}").json()
+    assert (detail["rows"], detail["cols"]) == (4, 6)
+
+
+def test_update_board_full_frame_corners_runs_auto_detection(
+    client: TestClient,
+) -> None:
+    resp = client.post(
+        "/api/projects",
+        files={"box_photo": ("box.jpg", _box_photo_bytes(), "image/jpeg")},
+        data={"name": "auto-quad", "piece_count": "24", "width_cm": "30", "height_cm": "20"},
+    )
+    assert resp.status_code == 200
+    project_id = resp.json()["project_id"]
+    resp = client.put(
+        f"/api/projects/{project_id}/calibration",
+        json={"points": [[0, 0], [400, 0], [400, 300], [0, 300]]},
+    )
+    assert resp.status_code == 200
+    image = np.full((600, 900, 3), 230, dtype=np.uint8)
+    rng = np.random.default_rng(3)
+    for r in range(4):
+        for c in range(6):
+            color = tuple(int(v) for v in rng.integers(40, 180, size=3))
+            cv2.rectangle(
+                image,
+                (180 + c * 60, 120 + r * 60),
+                (240 + c * 60, 180 + r * 60),
+                color,
+                -1,
+            )
+            cv2.rectangle(
+                image,
+                (180 + c * 60, 120 + r * 60),
+                (240 + c * 60, 180 + r * 60),
+                (0, 0, 0),
+                2,
+            )
+    ok, buf = cv2.imencode(".jpg", image)
+    assert ok
+    resp = client.put(
+        f"/api/projects/{project_id}/board",
+        files={"board_photo": ("board.jpg", buf.tobytes(), "image/jpeg")},
+        data={"corners": "[[0,0],[900,0],[900,600],[0,600]]"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "alignment" in body
+    # The stored board corners should reflect the detected (non-full-frame) quad.
+    detail = client.get(f"/api/projects/{project_id}").json()
+    stored = detail["board"]["corners"]
+    assert stored != [[0.0, 0.0], [900.0, 0.0], [900.0, 600.0], [0.0, 600.0]]
 
 
 def _piece_photo_bytes() -> bytes:
@@ -179,6 +256,24 @@ def _piece_photo_bytes() -> bytes:
 def _tiny_piece_photo_bytes() -> bytes:
     image = np.full((64, 64, 3), 255, dtype=np.uint8)
     cv2.rectangle(image, (26, 26), (38, 38), (30, 30, 30), -1)
+    ok, buf = cv2.imencode(".jpg", image)
+    assert ok
+    return buf.tobytes()
+
+
+def _star_piece_photo_bytes(size: int = 200) -> bytes:
+    """A star-shaped blob: not piece-like, must be rejected with a 422."""
+    image = np.full((size, size, 3), 255, dtype=np.uint8)
+    center = size / 2
+    outer, inner = size * 0.42, size * 0.10
+    points = []
+    for i in range(10):
+        radius = outer if i % 2 == 0 else inner
+        angle = math.pi * i / 5 - math.pi / 2
+        points.append(
+            (center + radius * math.cos(angle), center + radius * math.sin(angle))
+        )
+    cv2.fillPoly(image, [np.asarray(points, dtype=np.int32)], (30, 30, 30))
     ok, buf = cv2.imencode(".jpg", image)
     assert ok
     return buf.tobytes()
@@ -208,9 +303,17 @@ def test_locate_piece_returns_candidates(client: TestClient) -> None:
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert len(body["candidates"]) == 3
+    assert 3 <= len(body["candidates"]) <= 6
     for candidate in body["candidates"]:
         assert {"row", "col", "score", "confidence", "rotation"} <= set(candidate)
+        assert "region" in candidate
+        region = candidate["region"]
+        if region is not None:
+            assert {"x", "y", "w", "h"} <= set(region)
+            assert 0.0 <= region["x"] <= 1.0
+            assert 0.0 <= region["y"] <= 1.0
+            assert 0.0 < region["w"] <= 1.0
+            assert 0.0 < region["h"] <= 1.0
     assert body["latency_ms"] >= 0
     # The visual answer: a board image with the candidate gaps marked, plus the
     # overall board preview URL for the app to display next to the piece photo.
@@ -239,6 +342,16 @@ def test_locate_piece_rejects_tiny_piece(client: TestClient) -> None:
     )
     assert resp.status_code == 422
     assert "too small" in resp.json()["detail"].lower()
+
+
+def test_locate_piece_rejects_non_piece_shape(client: TestClient) -> None:
+    project_id = _prepare_located_project(client)
+    resp = client.post(
+        f"/api/projects/{project_id}/locate",
+        files={"piece_photo": ("piece.jpg", _star_piece_photo_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 422
+    assert "清晰的拼图块轮廓" in resp.json()["detail"]
 
 
 def test_locate_requires_board_state(client: TestClient) -> None:

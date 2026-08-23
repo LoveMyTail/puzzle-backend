@@ -54,12 +54,50 @@ def test_segment_piece_keeps_largest_component() -> None:
     assert mask[175, 30] == 0
 
 
+def test_segment_piece_extracts_from_textured_background() -> None:
+    """A piece on a textured, non-uniform background (like tissue paper)
+    must still be extracted: color-distance alone fragments into thousands of
+    noise components, so GrabCut has to carry this case.
+    """
+    base = _piece_image(120)
+    rng = np.random.default_rng(11)
+    textured = rng.integers(180, 255, size=base.shape, dtype=np.uint8)
+    speckle = rng.random(base.shape[:2]) < 0.05
+    textured[speckle] = 120
+    textured[base < 128] = base[base < 128]
+    signature = build_signature(textured)
+    lengths = sorted(signature.side_lengths)
+    assert lengths[0] > 60
+    assert lengths[-1] / lengths[0] < 3
+
+
 def test_split_sides_returns_four_resampled_sides() -> None:
     signature = build_signature(_piece_image(120))
     assert len(signature.sides) == 4
     assert all(len(side) == SIDE_SAMPLES for side in signature.sides)
     assert all(length > 0 for length in signature.side_lengths)
     assert max(abs(signature.sides[0])) > 0.02
+
+
+def _star_image(size: int = 160) -> np.ndarray:
+    """A spiky 10-point star: high perimeter/area ratio, clearly not a piece."""
+    image = np.full((size, size, 3), 255, dtype=np.uint8)
+    center = size / 2
+    outer, inner = size * 0.42, size * 0.10
+    points = []
+    for i in range(10):
+        radius = outer if i % 2 == 0 else inner
+        angle = math.pi * i / 5 - math.pi / 2
+        points.append(
+            (center + radius * math.cos(angle), center + radius * math.sin(angle))
+        )
+    cv2.fillPoly(image, [np.asarray(points, dtype=np.int32)], (30, 30, 30))
+    return image
+
+
+def test_build_signature_rejects_non_piece_shape() -> None:
+    with pytest.raises(ValueError, match="清晰的拼图块轮廓"):
+        build_signature(_star_image())
 
 
 def test_self_match_rotation_is_zero() -> None:
@@ -75,9 +113,30 @@ def test_rotation_invariance() -> None:
     rotated_image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
     rotated_signature = build_signature(rotated_image)
     score, k = match_rotation(signature, rotated_signature)
-    # A 90-degree clockwise image rotation shifts the side order by 3.
-    assert k == 3
-    assert score < 0.1
+    # The side order is anchored to the piece's own minimum-area rectangle,
+    # so a pure image rotation must not shift the signature (k == 0) and the
+    # profiles must stay nearly identical.
+    assert k == 0
+    assert score < 0.02
+
+
+def test_split_sides_survives_arbitrary_image_rotation() -> None:
+    image = _piece_image(120)
+    signature = build_signature(image)
+    height, width = image.shape[:2]
+    matrix = cv2.getRotationMatrix2D((width / 2, height / 2), 37, 1.0)
+    rotated_image = cv2.warpAffine(
+        image, matrix, (width, height), flags=cv2.INTER_LINEAR
+    )
+    rotated_signature = build_signature(rotated_image)
+    score, k = match_rotation(signature, rotated_signature)
+    assert score < 0.15
+    assert all(
+        0.6 * min(signature.side_lengths)
+        <= length
+        <= 1.6 * max(signature.side_lengths)
+        for length in rotated_signature.side_lengths
+    )
 
 
 def test_scale_invariance() -> None:

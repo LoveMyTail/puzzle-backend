@@ -11,9 +11,13 @@ from puzzle.vision.board import (
     CELL_PX,
     MIN_SOURCE_CELL_PX,
     align_board_to_grid,
+    alignment_quality,
+    cell_region_in_photo,
     classify_cells,
+    estimate_board_quad,
     extract_receiving_edges,
     find_gaps,
+    is_full_frame_corners,
     render_candidate_preview,
     render_gap_preview,
     segment_board,
@@ -28,6 +32,103 @@ def test_segment_board_detects_pieces() -> None:
     mask = segment_board(image)
     assert mask[80, 80] > 0
     assert mask[5, 5] == 0
+
+
+def test_is_full_frame_corners_detects_app_default() -> None:
+    shape = (600, 900)
+    assert is_full_frame_corners([[0, 0], [900, 0], [900, 600], [0, 600]], shape)
+    assert not is_full_frame_corners(
+        [[30, 25], [470, 35], [475, 395], [20, 385]], shape
+    )
+    assert is_full_frame_corners([], shape)
+
+
+def test_estimate_board_quad_finds_block_on_smooth_background() -> None:
+    image = np.full((600, 900, 3), 230, dtype=np.uint8)  # table
+    # A block of puzzle-like tiles with visible seams.
+    rows, cols = 4, 6
+    cell = 60
+    x0, y0 = 180, 120
+    rng = np.random.default_rng(7)
+    for r in range(rows):
+        for c in range(cols):
+            color = tuple(int(v) for v in rng.integers(40, 180, size=3))
+            cv2.rectangle(
+                image,
+                (x0 + c * cell, y0 + r * cell),
+                (x0 + (c + 1) * cell, y0 + (r + 1) * cell),
+                color,
+                -1,
+            )
+            cv2.rectangle(
+                image,
+                (x0 + c * cell, y0 + r * cell),
+                (x0 + (c + 1) * cell, y0 + (r + 1) * cell),
+                (0, 0, 0),
+                2,
+            )
+    quad = estimate_board_quad(image)
+    assert quad is not None
+    # The detected quad should roughly cover the tile block.
+    min_x, max_x = quad[:, 0].min(), quad[:, 0].max()
+    min_y, max_y = quad[:, 1].min(), quad[:, 1].max()
+    assert abs(min_x - x0) < 40
+    assert abs(min_y - y0) < 40
+    assert abs(max_x - (x0 + cols * cell)) < 40
+    assert abs(max_y - (y0 + rows * cell)) < 40
+
+
+def test_alignment_quality_penalizes_misalignment() -> None:
+    size = 2 * CELL_PX
+    image = np.full((size, size, 3), 255, dtype=np.uint8)
+    for r in range(2):
+        for c in range(2):
+            color = (60 + r * 60, 80 + c * 60, 120)
+            cv2.rectangle(
+                image,
+                (c * CELL_PX, r * CELL_PX),
+                ((c + 1) * CELL_PX, (r + 1) * CELL_PX),
+                color,
+                -1,
+            )
+            cv2.rectangle(
+                image,
+                (c * CELL_PX, r * CELL_PX),
+                ((c + 1) * CELL_PX, (r + 1) * CELL_PX),
+                (0, 0, 0),
+                2,
+            )
+    corners = [[0, 0], [size, 0], [size, size], [0, size]]
+    warped, mask = align_board_to_grid(image, corners, 2, 2)
+    quality = alignment_quality(warped, mask, 2, 2)
+    assert quality["ok"]
+    assert quality["boundary_ratio"] > 1.25
+    assert quality["note"] == "ok"
+    # Shift the corners by a quarter cell: seams no longer lie on the grid.
+    shifted = [
+        [CELL_PX // 2, 0],
+        [size + CELL_PX // 2, 0],
+        [size + CELL_PX // 2, size],
+        [CELL_PX // 2, size],
+    ]
+    warped_bad, mask_bad = align_board_to_grid(image, shifted, 2, 2)
+    bad = alignment_quality(warped_bad, mask_bad, 2, 2)
+    # The ratio still reports the drop even though it is informational now.
+    assert bad["boundary_ratio"] < quality["boundary_ratio"]
+
+
+def test_alignment_quality_flags_low_contrast_and_too_empty() -> None:
+    empty_mask = np.zeros((2 * CELL_PX, 2 * CELL_PX), dtype=np.uint8)
+    warped = np.full((2 * CELL_PX, 2 * CELL_PX, 3), 200, dtype=np.uint8)
+    low = alignment_quality(warped, empty_mask, 2, 2)
+    assert low["note"] == "low_contrast"
+    assert not low["ok"]
+
+    nearly_empty = empty_mask.copy()
+    nearly_empty[:CELL_PX, :CELL_PX] = 255
+    too_empty = alignment_quality(warped, nearly_empty, 2, 2)
+    assert too_empty["note"] == "too_empty"
+    assert too_empty["ok"]
 
 
 def test_find_gaps_around_filled_block() -> None:
@@ -56,6 +157,68 @@ def test_classify_cells_matches_drawn_region() -> None:
     assert filled[1:5, 1:6].all()
     assert not filled[0].any()
     assert not filled[:, 0].any()
+
+
+def test_cell_region_in_photo_maps_grid_cell_back_to_photo() -> None:
+    rows, cols = 4, 4
+    cell_px = 64
+    photo_shape = (512, 512)  # (height, width)
+    corners = [[0, 0], [512, 0], [512, 512], [0, 512]]
+    region = cell_region_in_photo(
+        corners, rows, cols, cell_px, photo_shape, row_1based=2, col_1based=2
+    )
+    assert region is not None
+    # Cell (2,2) spans [64,128) grid px; expanded by 50% -> [32,160). The
+    # homography uses the same dst convention as align_board_to_grid (grid
+    # width = grid_w - 1), so the mapping back is photo_x = grid_x * 512 / 255.
+    assert region["x"] == pytest.approx(32 / 255)
+    assert region["y"] == pytest.approx(32 / 255)
+    assert region["w"] == pytest.approx(128 / 255)
+    assert region["h"] == pytest.approx(128 / 255)
+
+
+def test_cell_region_in_photo_clamps_at_board_border() -> None:
+    rows, cols = 4, 4
+    photo_shape = (512, 512)
+    corners = [[0, 0], [512, 0], [512, 512], [0, 512]]
+    region = cell_region_in_photo(
+        corners, rows, cols, 64, photo_shape, row_1based=1, col_1based=1
+    )
+    assert region is not None
+    assert region["x"] >= 0.0 and region["y"] >= 0.0
+    assert region["x"] + region["w"] <= 1.0
+    assert region["y"] + region["h"] <= 1.0
+
+
+def test_cell_region_in_photo_degrades_to_none() -> None:
+    rows, cols = 4, 4
+    assert (
+        cell_region_in_photo([], rows, cols, 64, (512, 512), 1, 1) is None
+    )
+    assert (
+        cell_region_in_photo(
+            [[0, 0], [512, 0], [512, 512], [0, 512]],
+            rows,
+            cols,
+            64,
+            None,
+            1,
+            1,
+        )
+        is None
+    )
+    assert (
+        cell_region_in_photo(
+            [[0, 0], [512, 0], [512, 512], [0, 512]],
+            rows,
+            cols,
+            64,
+            (512, 512),
+            row_1based=99,
+            col_1based=1,
+        )
+        is None
+    )
 
 
 def test_extract_receiving_edges_on_top_and_right() -> None:

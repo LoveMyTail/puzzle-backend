@@ -47,7 +47,9 @@ def _piece_image(size: int = 120, distinct: bool = False) -> np.ndarray:
     return image
 
 
-def _piece_image_with_top_blank(size: int = CELL_PX, tab: float = 0.18) -> np.ndarray:
+def _piece_image_with_top_blank(
+    size: int = CELL_PX, tab: float = 0.18, angle: float = 0.0
+) -> np.ndarray:
     """Square piece whose top side dips down (a blank), other sides distinct."""
     amp = size * tab
     pad = int(math.ceil(amp)) + 6
@@ -65,7 +67,14 @@ def _piece_image_with_top_blank(size: int = CELL_PX, tab: float = 0.18) -> np.nd
     for i in range(per_side):
         t = i / (per_side - 1)
         points.append((0.6 * amp * math.sin(math.pi * t), size * (1 - t)))
-    polygon = (np.asarray(points, dtype=np.float32) + np.array([pad, pad])).astype(np.int32)
+    polygon = np.asarray(points, dtype=np.float32)
+    if angle:
+        center = (size / 2, size / 2)
+        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        polygon = cv2.transform(
+            polygon.reshape(-1, 1, 2), matrix
+        ).reshape(-1, 2)
+    polygon = (polygon + np.array([pad, pad])).astype(np.int32)
     image = np.full((size + 2 * pad, size + 2 * pad, 3), 255, dtype=np.uint8)
     cv2.fillPoly(image, [polygon], (30, 30, 30))
     return image
@@ -170,3 +179,44 @@ def test_real_chain_ranks_true_gap_first() -> None:
 
     top = top_candidates(signature, gaps_with_edges, k=3)
     assert (top[0]["row"], top[0]["col"]) == (3, 2)
+
+
+def test_real_chain_survives_arbitrary_piece_rotation() -> None:
+    """End-to-end regression: a piece photographed at a non-axis-aligned angle
+    must still rank the true gap first.
+
+    The side order is anchored to the piece's own minimum-area rectangle, so
+    the signature must be invariant to the piece's in-plane rotation in the
+    photo; otherwise real photos (never perfectly aligned) break matching.
+    """
+    from puzzle.solver.matcher import score_gaps
+
+    size = CELL_PX
+    amp = size * 0.18
+    mask = np.zeros((4 * size, 4 * size), dtype=np.uint8)
+    for row in range(2):
+        for col in range(2):
+            mask[
+                row * size : (row + 1) * size,
+                col * size : (col + 1) * size,
+            ] = 255
+    tab = _tab_polygon(size, 2 * size - 1, size, amp)
+    cv2.fillPoly(mask, [tab.astype(np.int32)], 255)
+
+    filled = classify_cells(mask, 4, 4)
+    gaps = find_gaps(filled)
+    gaps_with_edges = [
+        {
+            **gap,
+            "edges": extract_receiving_edges(
+                mask, 4, 4, gap["row"], gap["col"], filled=filled
+            ),
+        }
+        for gap in gaps
+    ]
+
+    signature = build_signature(_piece_image_with_top_blank(angle=37.0))
+
+    ranked = score_gaps(signature, gaps_with_edges)
+    assert (ranked[0]["row"], ranked[0]["col"]) == (3, 2)
+    assert ranked[0]["score"] < 0.05

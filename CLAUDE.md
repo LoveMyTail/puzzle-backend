@@ -41,7 +41,7 @@
 - `puzzle/vision/` — 图像处理（OpenCV）：
   - `calibration.py`（M1）— `estimate_grid`（根据片数与宽高比估算行/列数）、`warp_box_photo`（根据 4 个标注角点对盒子封面做透视矫正）、`slice_grid`、`draw_grid_overlay`。
   - `board.py`（M2）— `segment_board`（背景取图像边框像素的中位数，与背景颜色距离超过 `color_distance=40` 的像素视为拼图）、`align_board_to_grid`（把照片和掩膜 warp 到 `CELL_PX=64` 像素/格的固定网格）、`classify_cells`（覆盖率 ≥ `FILL_RATIO=0.5` 判定为已填）、`find_gaps`（与已填格相邻的空格）、`extract_receiving_edges`（在"邻居格 + 半个缺口"窗口内按扫描线取极值填充像素——保留凸入缺口的榫/槽形状）、`render_gap_preview`。
-  - `piece.py`（M3）— `segment_piece`（取最大连通分量）、`piece_contour`、`split_sides`（以 `minAreaRect` 角点为切点分成四条边）、`resample_contour`（按弧长重采样为 `SIDE_SAMPLES=64` 个点）、`side_profile`（采样点到弦的有符号距离，除以弦长归一化 → 对平移/旋转/均匀缩放不变）、`build_signature`、`validate_piece_resolution`（拒绝最短边低于配置下限的碎片，`MIN_SIDE_PX` 默认 16px，可用环境变量 `PUZZLE_MIN_SIDE_PX` 覆盖）。
+  - `piece.py`（M3）— `segment_piece`（**GrabCut 优先**：边框=确定背景、中心=大概前景，处理卫生纸/桌面等非纯色背景；失败时回退到颜色距离分割，均取最大连通分量）、`piece_contour`、`split_sides`（以 `minAreaRect` 四个对角方向的支撑点切分四条边，签名锚定碎片自身坐标系，对照片内任意平面旋转不变）、`resample_contour`（按弧长重采样为 `SIDE_SAMPLES=64` 个点）、`side_profile`（采样点到弦的有符号距离，除以弦长归一化）、`build_signature`、`validate_piece_shape`（周长/√面积 ≤ 7.5 且凸度 ≥ 0.55，拒绝“碎片+背景纹理/阴影”的污染轮廓，返回可操作的 422 提示）、`validate_piece_resolution`（拒绝最短边低于配置下限的碎片，`MIN_SIDE_PX` 默认 16px，可用环境变量 `PUZZLE_MIN_SIDE_PX` 覆盖）。
 - `puzzle/solver/matcher.py`（M4）— 缺口匹配：
   - `edge_profile` 把缺口接收边编码为与碎片边完全相同的特征。
   - `edge_distance` 取 `min(direct, mirrored)` 平均绝对差——碎片边与其邻居的接收边互为镜像，因此两种朝向都会尝试。
@@ -58,7 +58,7 @@
 | `GET /health` | — | 存活检查 |
 | `POST /api/projects` | 盒子照片、片数、成品尺寸（cm） | 创建项目，估算网格 |
 | `PUT /api/projects/{id}/calibration` | 项目存在 | 对盒子照片做 4 角点透视矫正，切分网格 |
-| `PUT /api/projects/{id}/board` | 已标定 | 板面照片对齐网格、判定已填格、找出缺口；**源照片每格像素低于配置下限（默认 16px）时返回 422** |
+| `PUT /api/projects/{id}/board` | 已标定 | 板面照片对齐网格、判定已填格、找出缺口；**源照片每格像素低于配置下限（默认 16px）时返回 422**。App 应传**用户框选的拼图四角**；传全幅角点时会尝试 `estimate_board_quad` 自动检测。响应新增 `alignment`（`boundary_ratio`/`ambiguous_cells`/`ok`），对齐质量差时 App 应提示用户重新框选 |
 | `POST /api/projects/{id}/locate` | 已标定且已上传板面 | 构建碎片签名、为各缺口打分、返回 Top-3 候选；**碎片最短边低于配置下限（默认 16px）时返回 422**。响应含 `preview_url`（候选标注图）与 `board_preview_url`（板面总览图），供 APP 端"碎片图 + 板面标注图"并排展示 |
 | `GET /api/projects/{id}/board/preview` | 已上传板面 | 返回缺口标注的板面总览图（已填格绿、缺口红） |
 | `GET /api/projects/{id}/locate/preview` | 已执行过 locate | 返回最近一次定位结果：warped 板面 + Top-1..3 候选缺口数字标注（①绿 ②橙 ③红） |
@@ -69,4 +69,12 @@
 - **尺度不变性是设计契约。** 每个特征都经过弦归一化并按弧长重采样为固定的 64 个点，板面也始终 warp 到固定的 64 px/格网格，因此照片的绝对尺寸会被抵消。分辨率守卫（`MIN_SIDE_PX`、`MIN_SOURCE_CELL_PX`，默认 16px）保护着榫/槽细节被量化丢失之下的保真度下限；可用环境变量 `PUZZLE_MIN_SIDE_PX` / `PUZZLE_MIN_CELL_PX` 调严（如 64px）。默认值刻意低于 `CELL_PX` / `SIDE_SAMPLES`（64），以兼容低分辨率拍摄（如模拟器），代价是匹配余量变小。
 - **接收边必须携带邻居的榫/槽形状**，而不只是边界线；匹配器依赖这一点（`test_real_chain_ranks_true_gap_first` 是对此的回归测试）。
 - **缺口坐标是 1-based**（API 与 `find_gaps` 输出中的行/列）；vision 代码内部会转换为 0-based。
+- **对齐质量是准确性的前提。** 真实照片中网格必须与拼图块对齐（App 框选四角或后端自动检测）；否则接收边采集到的是跨块的随机边界，匹配必然失真。`update_board` 返回的 `alignment.ok` 用于在入口拦截这类错误输入。
+- **碎片签名锚定在碎片自身的 minAreaRect 坐标系**（`split_sides` 用矩形四个对角方向的支撑点找侧边交界），因此对碎片在照片中的任意平面旋转不变；匹配只依赖四条边的循环顺序。
+- **自适应网格分辨率**：`adaptive_cell_px` 让 48 片这类小拼图以 192px/格（而非 64px/格）处理，保留接收边的榫/槽细节；大拼图自动回退到 64px/格以控制内存。
+- **碎片边界精修**：GrabCut 后按局部法线吸附到 Canny 边缘，且只有结果仍通过形状校验时才采用（防止照片纹理把轮廓切毛糙）。
+- **GrabCut 必须固定随机种子**：`cv2.setRNGSeed(42)` 在每次 grabCut 前调用，否则同一张照片每次运行会得到不同掩膜（OpenCV 内部 k-means 随机初始化），导致候选排名在请求间漂移——这曾造成“正确位置时而在 top-3、时而不在”的假性回归。
+- **边缘连续性（实验特性）**：`matcher.edge_continuity` 比较碎片与相邻已拼块在接缝处的归一化图案相关性，可区分形状重复的缺口；但相关性在低对比度照片上不稳定，默认关闭，用环境变量 `PUZZLE_CONTINUITY_WEIGHT`（如 0.1）开启。
+- **颜色邻居信号（默认开启）**：碎片核心颜色（轮廓质心附近圆形区域）与候选缺口相邻已拼块的平均颜色距离。形状重复时用颜色打破僵局；真实案例中真缺口的邻居颜色明显更接近碎片（距离 ~40-60 vs 错项 90+）。权重 `PUZZLE_COLOR_WEIGHT`（默认 0.08），按候选间最小/最大距离归一化后加进分数。
+- **置信度温度**：`PUZZLE_CONFIDENCE_TEMPERATURE`（默认 0.05）控制 softmin 的锐度；分数差距真实存在时给出更高的置信度。
 - 在没有重新审视项目概述之前，不要给匹配器引入颜色/纹理特征——纯形状方案是刻意为之。
