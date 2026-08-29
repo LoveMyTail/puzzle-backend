@@ -326,6 +326,37 @@ def test_locate_piece_returns_candidates(client: TestClient) -> None:
     assert board_preview.headers["content-type"].startswith("image/")
 
 
+def test_project_operation_journal_records_full_flow(client: TestClient) -> None:
+    project_id = _prepare_located_project(client)
+    resp = client.post(
+        f"/api/projects/{project_id}/locate",
+        files={"piece_photo": ("piece.jpg", _piece_photo_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 200
+    resp = client.put(
+        f"/api/projects/{project_id}/placed",
+        json={"row": 4, "col": 7},
+    )
+    assert resp.status_code == 200
+
+    resp = client.get(f"/api/projects/{project_id}/operations")
+    assert resp.status_code == 200
+    operations = resp.json()["operations"]
+    assert [op["op"] for op in operations] == [
+        "create",
+        "calibrate",
+        "board",
+        "locate",
+        "placed",
+    ]
+    assert operations[0]["files"]["box_photo.jpg"].endswith(
+        "box_photo.jpg"
+    )
+    assert operations[3]["candidates"]
+    assert operations[4]["row"] == 4
+    assert operations[4]["col"] == 7
+
+
 def test_board_preview_missing_before_upload(client: TestClient) -> None:
     project_id = _create_project(client)["project_id"]
     resp = client.get(f"/api/projects/{project_id}/board/preview")

@@ -48,6 +48,37 @@ logger = _configure_logging()
 app = FastAPI(title="Puzzle Assistant Backend", version="0.1.0")
 
 
+def _is_heic(content: bytes) -> bool:
+    """Detect HEIC/HEIF magic bytes so the API can return an actionable error."""
+    if len(content) < 12:
+        return False
+    brand = content[4:12]
+    return brand.startswith(b"ftyphei") or brand.startswith(b"ftypmif")
+
+
+def _save_operation(
+    project_id: str,
+    op: str,
+    files: dict[str, bytes] | None = None,
+    **fields: object,
+) -> dict:
+    """Persist one replayable operation under the project directory."""
+    seq = project_store.next_operation_seq(project_id)
+    saved_paths: dict[str, str] = {}
+    if files:
+        ops_dir = project_store.project_dir(project_id) / "ops"
+        ops_dir.mkdir(parents=True, exist_ok=True)
+        for name, data in files.items():
+            path = ops_dir / f"{seq:03d}_{op}_{name}"
+            path.write_bytes(data)
+            saved_paths[name] = str(path)
+    return project_store.append_operation(
+        project_id,
+        {"op": op, "files": saved_paths, **fields},
+        seq=seq,
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -62,6 +93,7 @@ def create_project(
     height_cm: float = Form(...),
 ) -> dict:
     rows, cols = calibration.estimate_grid(piece_count, width_cm, height_cm)
+    box_photo_bytes = box_photo.file.read()
     metadata = project_store.create_project(
         name=name,
         piece_count=piece_count,
@@ -69,7 +101,18 @@ def create_project(
         height_cm=height_cm,
         rows=rows,
         cols=cols,
-        box_photo=box_photo.file.read(),
+        box_photo=box_photo_bytes,
+    )
+    _save_operation(
+        metadata["id"],
+        "create",
+        {"box_photo.jpg": box_photo_bytes},
+        name=name,
+        piece_count=piece_count,
+        width_cm=width_cm,
+        height_cm=height_cm,
+        rows=rows,
+        cols=cols,
     )
     return {
         "project_id": metadata["id"],
@@ -126,6 +169,13 @@ def calibrate_project(project_id: str, payload: dict) -> dict:
             "preview_path": str(preview_path),
         },
     )
+    _save_operation(
+        project_id,
+        "calibrate",
+        points=corners,
+        rows=rows,
+        cols=cols,
+    )
     return {
         "project_id": project_id,
         "rows": rows,
@@ -170,6 +220,11 @@ def update_board(
     rows = int(metadata["rows"])
     cols = int(metadata["cols"])
     content = board_photo.file.read()
+    if _is_heic(content):
+        raise HTTPException(
+            status_code=422,
+            detail="HEIC/HEIF 图片不受支持，请先转换为 JPEG 或 PNG 再上传",
+        )
     image = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise HTTPException(status_code=422, detail="unreadable board photo")
@@ -262,6 +317,18 @@ def update_board(
             "mask_path": str(mask_path),
         },
     )
+    _save_operation(
+        project_id,
+        "board",
+        {"board_photo.jpg": content},
+        corners=corner_points,
+        rows=rows,
+        cols=cols,
+        filled_cells=int(filled.sum()),
+        gaps_count=len(gaps),
+        alignment=quality,
+        corners_auto=corners_auto,
+    )
     return {
         "project_id": project_id,
         "rows": rows,
@@ -274,13 +341,32 @@ def update_board(
 
 
 @app.post("/api/projects/{project_id}/locate")
-def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
+def locate_piece(
+    project_id: str,
+    piece_photo: UploadFile = File(...),
+    exclude: Optional[str] = Form(None),  # noqa: UP045 - project targets Python 3.9
+) -> dict:
     content = piece_photo.file.read()
     logger.info(
         "piece_match_start project=%s photo_bytes=%d",
         project_id,
         len(content),
     )
+    if _is_heic(content):
+        raise HTTPException(
+            status_code=422,
+            detail="HEIC/HEIF 图片不受支持，请先转换为 JPEG 或 PNG 再上传",
+        )
+    excluded_positions: set[tuple[int, int]] = set()
+    if exclude:
+        try:
+            excluded_positions = {
+                (int(row), int(col)) for row, col in json.loads(exclude)
+            }
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=422, detail="exclude must be a list of [row, col] pairs"
+            ) from exc
     started_all = time.perf_counter()
     try:
         metadata = project_store.get_project(project_id)
@@ -353,6 +439,8 @@ def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
         filled = board.classify_cells(mask, rows, cols, cell_px=cell_px)
         gaps_with_edges = []
         for gap in board.find_gaps(filled):
+            if (int(gap["row"]), int(gap["col"])) in excluded_positions:
+                continue
             edges = board.extract_receiving_edges(
                 mask,
                 rows,
@@ -481,6 +569,7 @@ def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
             edges = gaps_by_pos.get(
                 (candidate["row"], candidate["col"]), {}
             )
+            candidate["directions"] = len(edges)
             per_rotation = []
             for k in range(4):
                 scores = []
@@ -526,53 +615,60 @@ def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
                     candidate["row"],
                     candidate["col"],
                 )
-        debug_dir = project_store.project_dir(project_id)
-        piece_overlay_path = debug_dir / "piece_mask_overlay.jpg"
-        piece_overlay = image.copy()
-        cv2.drawContours(
-            piece_overlay,
-            [signature.contour.astype(np.int32)],
-            -1,
-            (0, 0, 255),
-            4,
-        )
-        cv2.imwrite(str(piece_overlay_path), piece_overlay)
-        board_edges_path = debug_dir / "board_edges_debug.jpg"
-        warped_path = board_info.get("warped_path")
-        board_debug = None
-        if warped_path and Path(warped_path).exists():
-            board_debug = cv2.imread(str(warped_path))
-        if board_debug is not None:
-            for gap in gaps_with_edges:
-                for points in gap["edges"].values():
-                    for x, y in points:
-                        cv2.circle(board_debug, (int(x), int(y)), 2, (0, 255, 0), -1)
-            for rank, candidate in enumerate(candidates, start=1):
-                x0 = (candidate["col"] - 1) * cell_px
-                y0 = (candidate["row"] - 1) * cell_px
-                cv2.rectangle(
-                    board_debug,
-                    (x0, y0),
-                    (x0 + cell_px - 1, y0 + cell_px - 1),
-                    (0, 165, 255) if rank == 1 else (0, 60, 255),
-                    3,
-                )
-                cv2.putText(
-                    board_debug,
-                    str(rank),
-                    (x0 + cell_px // 2 - 8, y0 + cell_px // 2 + 12),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 0, 0),
-                    5,
-                    cv2.LINE_AA,
-                )
-            cv2.imwrite(str(board_edges_path), board_debug)
-        project_store.update_project(
-            project_id,
-            debug_piece_overlay=str(piece_overlay_path),
-            debug_board_edges=str(board_edges_path),
-        )
+        if os.environ.get("PUZZLE_WRITE_DEBUG_IMAGES", "0") == "1":
+            debug_dir = project_store.project_dir(project_id)
+            piece_overlay_path = debug_dir / "piece_mask_overlay.jpg"
+            piece_overlay = image.copy()
+            cv2.drawContours(
+                piece_overlay,
+                [signature.contour.astype(np.int32)],
+                -1,
+                (0, 0, 255),
+                4,
+            )
+            cv2.imwrite(str(piece_overlay_path), piece_overlay)
+            board_edges_path = debug_dir / "board_edges_debug.jpg"
+            warped_path = board_info.get("warped_path")
+            board_debug = None
+            if warped_path and Path(warped_path).exists():
+                board_debug = cv2.imread(str(warped_path))
+            if board_debug is not None:
+                for gap in gaps_with_edges:
+                    for points in gap["edges"].values():
+                        for x, y in points:
+                            cv2.circle(
+                                board_debug,
+                                (int(x), int(y)),
+                                2,
+                                (0, 255, 0),
+                                -1,
+                            )
+                for rank, candidate in enumerate(candidates, start=1):
+                    x0 = (candidate["col"] - 1) * cell_px
+                    y0 = (candidate["row"] - 1) * cell_px
+                    cv2.rectangle(
+                        board_debug,
+                        (x0, y0),
+                        (x0 + cell_px - 1, y0 + cell_px - 1),
+                        (0, 165, 255) if rank == 1 else (0, 60, 255),
+                        3,
+                    )
+                    cv2.putText(
+                        board_debug,
+                        str(rank),
+                        (x0 + cell_px // 2 - 8, y0 + cell_px // 2 + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 0, 0),
+                        5,
+                        cv2.LINE_AA,
+                    )
+                cv2.imwrite(str(board_edges_path), board_debug)
+            project_store.update_project(
+                project_id,
+                debug_piece_overlay=str(piece_overlay_path),
+                debug_board_edges=str(board_edges_path),
+            )
         logger.info(
             "piece_match_done project=%s candidates=%s match_latency_ms=%.1f "
             "total_ms=%.1f",
@@ -649,6 +745,27 @@ def locate_piece(project_id: str, piece_photo: UploadFile = File(...)) -> dict:
                 "locate_preview_skipped project=%s reason=warped image missing",
                 project_id,
             )
+        _save_operation(
+            project_id,
+            "locate",
+            {"piece_photo.jpg": content},
+            exclude=sorted(list(excluded_positions)),
+            latency_ms=latency_ms,
+            candidates=[
+                {
+                    "row": candidate["row"],
+                    "col": candidate["col"],
+                    "score": round(float(candidate["score"]), 4),
+                    "rotation": candidate["rotation"],
+                    "confidence": round(float(candidate["confidence"]), 3),
+                    "rotation_confident": candidate.get(
+                        "rotation_confident", True
+                    ),
+                    "directions": candidate.get("directions", 0),
+                }
+                for candidate in candidates
+            ],
+        )
         return {
             "project_id": project_id,
             "candidates": candidates,
@@ -696,6 +813,44 @@ def locate_preview(project_id: str) -> FileResponse:
             status_code=404, detail="locate preview not found; run locate first"
         )
     return FileResponse(str(path), media_type="image/jpeg")
+
+
+@app.get("/api/projects/{project_id}/operations")
+def list_operations(project_id: str) -> dict:
+    """Return the replayable operation journal for a project."""
+    metadata = project_store.get_project(project_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return {
+        "project_id": project_id,
+        "operations": project_store.read_operations(project_id),
+    }
+
+
+@app.put("/api/projects/{project_id}/placed")
+def mark_placed(project_id: str, payload: dict) -> dict:
+    """Record that the user placed a piece into a cell."""
+    metadata = project_store.get_project(project_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    try:
+        row = int(payload["row"])
+        col = int(payload["col"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail="row and col are required integers"
+        ) from exc
+    if row < 1 or col < 1:
+        raise HTTPException(
+            status_code=422, detail="row and col must be positive"
+        )
+    record = _save_operation(project_id, "placed", row=row, col=col)
+    return {
+        "project_id": project_id,
+        "row": row,
+        "col": col,
+        "seq": record["seq"],
+    }
 
 
 @app.get("/api/projects/{project_id}")

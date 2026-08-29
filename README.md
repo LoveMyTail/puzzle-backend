@@ -36,9 +36,13 @@
 | `POST /api/projects/{id}/locate` | 碎片定位：返回候选（row/col/score/confidence/rotation/region/rotation_confident） |
 | `GET /api/projects/{id}/board/preview` | 板面缺口标注图 |
 | `GET /api/projects/{id}/locate/preview` | 最近一次定位的候选标注图 |
+| `GET /api/projects/{id}/operations` | 读取项目的可回放操作日志 |
+| `PUT /api/projects/{id}/placed` | 记录用户已把某块碎片放入 (row, col) |
 | `GET /api/projects/{id}` | 项目元数据 |
 
 `locate` 每次从存储的板面照片用当前代码重算掩膜，并生成诊断图（`piece_mask_overlay.jpg`、`board_edges_debug.jpg`）与碎片照片（`piece_photo.jpg`），方便复盘。
+
+每个项目的 `operations.jsonl` 按时间顺序记录 `create` / `calibrate` / `board` / `locate` / `placed` 五类操作，包含序号、时间戳、请求参数、响应摘要，以及每次上传的原始照片（保存在项目目录 `ops/` 下，文件名形如 `003_locate_piece_photo.jpg`），可用于自动化回放与回归测试。
 
 ### 测试与验证
 

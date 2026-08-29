@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 
 import cv2
@@ -18,6 +19,7 @@ import numpy as np
 from puzzle.vision.board import segment_board
 
 logger = logging.getLogger("puzzle.piece")
+_grabcut_lock = threading.Lock()
 
 SIDE_SAMPLES = 64
 MIN_SIDE_PX = 16  # default shortest-side floor (px); below this, tab/blank detail is lost
@@ -106,17 +108,19 @@ def _segment_piece_grabcut(image: np.ndarray) -> np.ndarray | None:
     foreground_model = np.zeros((1, 65), dtype=np.float64)
     # GrabCut's internal k-means uses OpenCV's global RNG; without a fixed
     # seed the same photo yields different masks run-to-run, which made
-    # candidate rankings unstable across requests.
-    cv2.setRNGSeed(42)
-    mask, _, _ = cv2.grabCut(
-        small,
-        init,
-        None,
-        background_model,
-        foreground_model,
-        4,
-        cv2.GC_INIT_WITH_MASK,
-    )
+    # candidate rankings unstable across requests. The seed is process-level,
+    # so hold a lock to keep concurrent requests from interfering with it.
+    with _grabcut_lock:
+        cv2.setRNGSeed(42)
+        mask, _, _ = cv2.grabCut(
+            small,
+            init,
+            None,
+            background_model,
+            foreground_model,
+            4,
+            cv2.GC_INIT_WITH_MASK,
+        )
     piece = np.where(
         (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0
     ).astype(np.uint8)
